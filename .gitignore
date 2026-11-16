@@ -1,0 +1,9 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+data/*.db
+data/*.csv
+data/*.jsonl
+reports/*
+!reports/.gitkeep
+!data/.gitkeep
