@@ -91,21 +91,36 @@ class TCPSink(Sink):
 
 
 class HTTPSink(Sink):
-    def __init__(self, url: str, batch: int = 1):
+    def __init__(self, url: str, batch: int = 1, token: str = "", retries: int = 60):
         self.url, self.batch, self.buffer = url, max(1, batch), []
+        self.token, self.retries = token, retries
+        self.history = False
 
     def write(self, record: dict) -> None:
         self.buffer.append(record)
-        if len(self.buffer) >= self.batch:
+        if len(self.buffer) >= (500 if self.history else self.batch):
             self.flush()
 
     def flush(self) -> None:
         if not self.buffer:
             return
-        body = json.dumps(self.buffer if len(self.buffer) > 1 else self.buffer[0]).encode("utf-8")
-        req = urllib.request.Request(self.url, data=body, headers={"Content-Type": "application/json"}, method="POST")
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            resp.read()
+        payload = {"history": True, "transactions": self.buffer} if self.history else \
+            (self.buffer if len(self.buffer) > 1 else self.buffer[0])
+        headers = {"Content-Type": "application/json"}
+        if self.token:
+            headers["Authorization"] = f"Bearer {self.token}"
+        for attempt in range(self.retries):   # the receiving channel may still be starting
+            try:
+                req = urllib.request.Request(self.url, data=json.dumps(payload).encode("utf-8"), headers=headers,
+                                             method="POST")
+                with urllib.request.urlopen(req, timeout=15) as resp:
+                    resp.read()
+                break
+            except OSError as exc:
+                if attempt == self.retries - 1:
+                    raise
+                print(f"waiting for {self.url}: {exc}", file=sys.stderr)
+                time.sleep(2)
         self.buffer = []
 
     def close(self) -> None:
@@ -150,7 +165,7 @@ def make_sink(args) -> Sink:
     if args.output == "tcp":
         return TCPSink(args.host, args.port)
     if args.output == "http":
-        return HTTPSink(args.url, args.batch)
+        return HTTPSink(args.url, args.batch, args.token)
     if args.output == "sqlite":
         return SQLiteSink(args.file or "data/core_bank.db", args.table)
     raise SystemExit(f"unknown output {args.output}")
@@ -180,6 +195,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--port", type=int, default=9009)
     p.add_argument("--url", default="http://127.0.0.1:8088/transactions")
     p.add_argument("--batch", type=int, default=1, help="records per HTTP POST")
+    p.add_argument("--token", default=os.environ.get("CHANNEL_TOKEN", ""), help="bearer token of the HTTP channel")
     p.add_argument("--live", action="store_true", help="keep streaming after the history")
     p.add_argument("--rate", type=float, default=5.0, help="live transactions per second (0 = no pause)")
     p.add_argument("--count", type=int, default=0, help="stop the live stream after N records (0 = never)")
@@ -191,12 +207,16 @@ def main(argv: list[str] | None = None) -> int:
     written = frauds = 0
     try:
         if args.days > 0:
+            if isinstance(sink, HTTPSink):
+                sink.history = True     # sent as {"history": true, ...}: used to train the profiles
             for record in gen.history(args.days, args.history_fraud_ratio):
                 sink.write(record)
                 written += 1
                 frauds += record["is_fraud"]
             if hasattr(sink, "flush"):
                 sink.flush()
+            if isinstance(sink, HTTPSink):
+                sink.history = False
             print(f"history: {written} transactions ({frauds} fraudulent) over {args.days} days", file=sys.stderr)
         if args.live:
             live = 0

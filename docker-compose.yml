@@ -1,0 +1,88 @@
+# BankSealer Enterprise
+#   docker compose --profile demo up -d --build     # full stack + mock transaction feed
+#   docker compose up -d --build                     # without the mock feed
+# Console: http://localhost:8080   API docs: http://localhost:8000/api/docs
+name: banksealer
+
+x-backend: &backend
+  build:
+    context: .
+    secrets: [corporate_ca]
+  image: banksealer/backend:2.0.0
+  restart: unless-stopped
+  environment:
+    DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-banksealer}:${POSTGRES_PASSWORD:-banksealer}@db:5432/${POSTGRES_DB:-banksealer}
+    JWT_SECRET: ${JWT_SECRET:-change-me-in-production-use-a-long-random-secret}
+    ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}
+    ADMIN_PASSWORD: ${ADMIN_PASSWORD:-admin123}
+    DATA_DIR: /data
+    SEED_CONFIG: /app/config/enterprise.yaml
+    LOG_LEVEL: ${LOG_LEVEL:-INFO}
+  volumes:
+    - appdata:/data
+  depends_on:
+    db:
+      condition: service_healthy
+
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-banksealer}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-banksealer}
+      POSTGRES_DB: ${POSTGRES_DB:-banksealer}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  api:
+    <<: *backend
+    command: ["uvicorn", "server.api.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "2", "--proxy-headers"]
+    ports:
+      - "${API_PORT:-8000}:8000"
+
+  worker:
+    <<: *backend
+    command: ["python", "-m", "server.worker.main"]
+    healthcheck:
+      disable: true
+    ports:
+      - "${WEBHOOK_PORT:-8088}:8088"   # HTTP webhook channel
+      - "${TCP_PORT:-9009}:9009"       # TCP JSON-lines channel
+
+  frontend:
+    build:
+      context: ./frontend
+      secrets: [corporate_ca]
+    image: banksealer/console:2.0.0
+    restart: unless-stopped
+    ports:
+      - "${CONSOLE_PORT:-8080}:80"
+    depends_on:
+      - api
+
+  mock-feed:
+    <<: *backend
+    profiles: ["demo"]
+    restart: on-failure
+    command: ["python", "mock_channel/generate_transactions.py", "--output", "http",
+              "--url", "http://worker:8088/transactions", "--customers", "150", "--days", "45",
+              "--history-fraud-ratio", "0", "--fraud-ratio", "0.03", "--live", "--rate", "${MOCK_RATE:-4}",
+              "--seed", "42"]
+    healthcheck:
+      disable: true
+    depends_on:
+      - worker
+
+volumes:
+  pgdata:
+  appdata:
+
+secrets:
+  corporate_ca:   # set CORPORATE_CA_FILE in .env when builds run behind a TLS-inspecting proxy
+    file: ${CORPORATE_CA_FILE:-./docker/corporate-ca.pem}

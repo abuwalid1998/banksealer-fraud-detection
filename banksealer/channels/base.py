@@ -21,12 +21,14 @@ class Channel:
     default_options: dict = {}
 
     def __init__(self, name: str, options: Optional[dict] = None, field_mapping: Optional[dict] = None,
-                 out_queue: Optional[queue.Queue] = None):
+                 out_queue: Optional[queue.Queue] = None, preparation: Optional[dict] = None):
         self.name = name
         self.options = {**self.default_options, **(options or {})}
         self.field_mapping = dict(field_mapping or {})
+        self.preparation = dict(preparation or {})
         self.queue: queue.Queue = out_queue if out_queue is not None else queue.Queue()
-        self.preparer = TransactionPreparer(self.field_mapping, default_bank=self.options.get("default_bank", "DEFAULT"))
+        self.preparer = TransactionPreparer(self.field_mapping, default_bank=self.options.get("default_bank", "DEFAULT"),
+                                            rules=self.preparation)
         self.status = "stopped"
         self.last_error = ""
         self.received = 0

@@ -1,21 +1,113 @@
-# BankSealer Fraud Detection: desktop application
+# BankSealer Fraud Detection: Enterprise Solution
 
-A desktop application for online-banking fraud analysis based on the **BankSealer** framework
+An enterprise platform for online-banking fraud analysis based on the **BankSealer** framework
 (Carminati et al., *"BankSealer: A decision support system for online banking fraud analysis and
-investigation"*, Computers & Security 2015). It can:
+investigation"*, Computers & Security 2015). It runs with **Docker Compose** and has:
 
-* **link transaction channels** (mock generator, TCP feed, HTTP webhook, CSV file, SQLite core-banking table)
-  and **prepare** their records: field mapping, cleaning, validation, enrichment and de-duplication
-* score every transaction with the three BankSealer profiles: **local** (HBOS), **temporal**
-  (per-customer thresholds) and **global** (iterative DBSCAN + CBLOF)
-* show a **dashboard** of the results per customer and per transaction, with the suspicion score of each transaction
-* **explain** every suspicious transaction and produce a **PDF report** for it
-* use **bank/company thresholds** configurable from a YAML file or the *Configuration* tab
-* include a **mock data channel** written in Python that generates realistic transactions with injected fraud
+* **Frontend**: a React web console (nginx) with the dashboard, alerts with explanations,
+  customers, reports, channels, data preparation, engine, banks & thresholds, users and audit log.
+* **Backend**:
+  * a **REST API** (FastAPI, JWT authentication, viewer/analyst/admin roles, audit log, OpenAPI docs)
+  * a **worker** that runs the transaction channels, data preparation and the BankSealer engine:
+    local HBOS, temporal thresholds, global DBSCAN + CBLOF
+* **Configuration database** (PostgreSQL): banks/companies and their thresholds, engine
+  parameters, **channel configurations** (connector, field mapping, preparation rules) and users.
+  Changes made in the console apply to the running worker within seconds.
+* **Mock data channel**: a Python generator that streams 45 days of history and then live
+  transactions with injected fraud into the HTTP webhook channel.
 
-![Dashboard](docs/screenshots/dashboard.png)
+![Dashboard](docs/enterprise/dashboard.png)
 
-## Quick start
+## Run it
+
+```bash
+cp .env.example .env          # change ADMIN_PASSWORD, JWT_SECRET, POSTGRES_PASSWORD
+```
+```bash
+docker compose --profile demo up -d --build
+```
+
+| URL | What |
+|-----|------|
+| http://localhost:8080 | Web console. Sign in with `admin` / the `ADMIN_PASSWORD` from `.env` (default `admin123`) |
+| http://localhost:8000/api/docs | REST API (Swagger / OpenAPI) |
+| `localhost:8088/transactions` | HTTP webhook channel (`POST` JSON) |
+| `localhost:9009` | TCP JSON-lines channel |
+
+Without `--profile demo` the stack starts without the mock feed, ready for your own channels.
+`docker compose logs -f worker` shows the channels, training and scoring.
+
+```
+browser ─► frontend (nginx + React) ─/api─► api (FastAPI) ─┐
+core banking ─► :8088 webhook ─┐                            ├─► PostgreSQL (configuration + data)
+branch feeds ─► :9009 TCP ─────┼─► worker (channels → preparation → BankSealer) ─┘
+files (/data/incoming) ────────┘           └─► PDF reports (/data/reports)
+mock-feed (demo profile) ─► :8088
+```
+
+### What you can do in the console
+
+| Page | |
+|------|---|
+| **Dashboard** | KPIs (scored, suspicious, critical, open alerts, amount at risk), score distribution against the thresholds, suspicious per day, by bank and type, profile scores, top detection reasons, channel status. Can be filtered by bank |
+| **Alerts / Transactions** | Filter and sort by bank, type, risk, status and search. CSV export, summary PDF report |
+| **Transaction detail** | Local / temporal / global / combined score bars against the bank threshold, **why it is suspicious** (ranked findings with their impact), the customer's usual behaviour, a PDF report, and the analyst decision (*confirm fraud*, *legitimate*, which the profile then learns) |
+| **Customers** | Per-customer statistics, peer group, global outlier score, learned profile, score timeline, hours of activity |
+| **Reports** | Automatic and on-demand PDF reports, summaries |
+| **Channels** | Link, configure, start, stop and restart channels (HTTP, TCP, CSV, SQLite, mock). Each has connector options, a **field mapping** and **preparation rules**, plus live counters and rejected records |
+| **Data preparation** | Workbench: load a channel's mapping and rules, paste sample records and see what is accepted or rejected; save back to the channel |
+| **Engine & training** | Worker state, retrain, upload history or files to score, command history |
+| **Banks & thresholds** | Default thresholds, per-bank overrides (inherited values greyed), engine/profile parameters, auto-report, YAML import/export |
+| **Users / Audit log** | Role-based users, and every change with before and after values |
+
+| Alert detail | Channels |
+|---|---|
+| ![](docs/enterprise/transaction.png) | ![](docs/enterprise/channels.png) |
+| **Data preparation** | **Bank thresholds** |
+| ![](docs/enterprise/preparation.png) | ![](docs/enterprise/bank-editor.png) |
+
+The architecture, the database tables, the channel/preparation reference, the training
+lifecycle, security and operations are documented in **[docs/ENTERPRISE.md](docs/ENTERPRISE.md)**.
+The algorithm is documented in **[docs/ALGORITHM.md](docs/ALGORITHM.md)**.
+
+### Verifying a deployment
+
+```bash
+python scripts/smoke_test.py --url http://localhost:8080 --password admin123
+```
+
+It runs 16 end-to-end checks against a running stack. They cover:
+
+* health, login and engine state
+* alerts, explanations and PDF reports
+* feedback and per-bank re-evaluation
+* preparation preview and channel create/delete
+* file upload, CSV export, summary report and audit log
+
+### Development without Docker
+
+```bash
+pip install -r requirements.txt -r requirements-server.txt httpx
+```
+```bash
+DATABASE_URL=sqlite:///data/dev.db python -m uvicorn server.api.main:app --port 8000
+```
+```bash
+DATABASE_URL=sqlite:///data/dev.db python -m server.worker.main
+```
+```bash
+cd frontend && npm install && npm run dev      # http://localhost:5173 (proxies /api to :8000)
+```
+
+Tests: `QT_QPA_PLATFORM=offscreen python -m pytest -q`. This includes the in-process
+API + worker integration test, `tests/test_enterprise.py`.
+
+---
+
+The **desktop edition** (PySide6) from the earlier version is still included and uses the same
+engine, channels and mock generator:
+
+## Desktop edition: quick start
 
 ```bash
 pip install -r requirements.txt
@@ -34,7 +126,7 @@ python run_desktop.py --resume            # continue the previous session (score
 python run_desktop.py --config my.yaml    # another configuration
 ```
 
-## The application
+## Desktop edition: tabs
 
 | Tab | What it shows |
 |-----|---------------|
@@ -165,8 +257,22 @@ run_desktop.py
 
 Tests: `QT_QPA_PLATFORM=offscreen python -m pytest -q`
 
+### Project layout (enterprise additions)
+
+```
+server/               backend: settings, db, models, config_store, security, mapping
+  api/                FastAPI app and routers (auth, users/audit, dashboard, transactions/reports,
+                      customers, channels, preparation, config/banks, engine)
+  worker/             processing worker (channels -> preparation -> engine -> database)
+frontend/             React + TypeScript console (Vite), nginx.conf, Dockerfile
+config/enterprise.yaml seed configuration for the configuration database
+Dockerfile            backend image (api, worker, mock-feed)
+docker-compose.yml    db, api, worker, frontend, mock-feed (demo profile)
+scripts/smoke_test.py end-to-end checks against a running stack
+```
+
 ### Other folders
 
-The `backend/` (Spring Boot), `database/`, `infrastructure/` (Docker/Terraform) and `ml/` folders
-are placeholders from the original service-oriented plan (Spring Boot ingestion, PostgreSQL,
-Chart.js). The desktop application above does not depend on them.
+The `backend/` (Spring Boot), `database/`, `infrastructure/` and `ml/` folders are empty
+placeholders from the original plan. The enterprise solution is the `server/` + `frontend/` +
+`docker-compose.yml` stack above.

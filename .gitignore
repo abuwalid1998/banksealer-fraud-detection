@@ -7,3 +7,8 @@ data/*.jsonl
 reports/*
 !reports/.gitkeep
 !data/.gitkeep
+frontend/node_modules/
+frontend/dist/
+.env
+docker/local-ca.pem
+frontend/*.tsbuildinfo
