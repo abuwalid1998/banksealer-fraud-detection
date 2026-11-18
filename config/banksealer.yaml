@@ -1,0 +1,136 @@
+# ---------------------------------------------------------------------------
+# BankSealer desktop application - configuration
+#
+# Every value below can also be edited from the "Configuration" tab of the
+# desktop application. Saving from the UI rewrites this file.
+#
+# Layout:
+#   app        - paths and UI refresh settings
+#   engine     - how the three BankSealer profiles are combined / retrained
+#   local      - local (per-customer) profile, HBOS
+#   temporal   - temporal (per-customer, per time window) profile
+#   global     - global (peer-group) profile, iterative DBSCAN + CBLOF
+#   thresholds - DEFAULT decision thresholds, used by every bank/company
+#   banks      - per bank/company overrides of `thresholds`
+#   channels   - transaction channels the application connects to
+# ---------------------------------------------------------------------------
+
+app:
+  database: data/banksealer.db
+  reports_dir: reports
+  refresh_interval_ms: 1000      # how often the UI drains the channel queue
+  max_rows_in_memory: 50000
+  auto_report: true              # write a PDF report for every suspicious transaction
+  auto_report_min_level: MEDIUM  # MEDIUM | HIGH | CRITICAL
+
+engine:
+  # weights used to combine the three profile scores into one suspicion score
+  profile_weights:
+    local: 0.5
+    temporal: 0.3
+    global: 0.2
+  min_training_transactions: 300 # buffer this many before the first fit
+  retrain_global_every: 1000     # refit the global (peer) profile every N scored tx
+  update_profiles_online: true   # learn from newly scored transactions
+  exclude_suspicious_from_learning: true
+  max_reasons: 6                 # reasons listed per suspicious transaction
+
+local:
+  min_history: 10        # fewer past tx of a type => customer is "undertrained"
+  shrinkage_k: 10        # lambda = n / (n + k): weight of the personal histogram
+  smoothing_alpha: 0.5   # pseudo-count for values never seen before
+  amount_bins: 24        # log-spaced amount histogram bins
+  neighbor_weight: 0.5   # smoothing towards adjacent numeric/hour bins
+  score_scale: 8.0       # normalised score = 1 - exp(-raw / score_scale)
+  min_reason_contribution: 1.0
+  feature_weights:
+    bank_transfer: {amount: 1.0, iban: 1.0, iban_cc: 1.2, cc_asn: 1.0, ip: 0.4, hour: 0.6}
+    phone_recharge: {amount: 1.0, phone_number: 1.0, operator: 0.5, cc_asn: 1.0, ip: 0.4, hour: 0.6}
+    prepaid_card: {amount: 1.0, card_id: 1.0, cc_asn: 1.0, ip: 0.4, hour: 0.6}
+
+temporal:
+  window_hours: 24       # sliding aggregation window
+  sigma_multiplier: 3.0  # personal threshold = mean + k * std
+  min_windows: 5         # fewer samples => blend with population statistics
+  shrinkage_k: 10
+  score_scale: 4.0
+  feature_weights:
+    tx_count: 1.0
+    total_amount: 1.0
+    max_amount: 0.6
+    distinct_beneficiaries: 1.0
+    distinct_cc_asn: 0.8
+    foreign_count: 1.0
+
+global:
+  eps: 1.2               # DBSCAN radius in Mahalanobis units
+  min_samples: 5
+  eps_growth: 1.5        # iterative DBSCAN: radius multiplier for leftover noise
+  max_iterations: 4
+  cblof_alpha: 0.9       # large clusters hold at least alpha of the customers
+  cblof_beta: 5.0        # or are beta times bigger than the next one
+  weight_by_cluster_size: false   # false = unweighted CBLOF
+  score_quantile: 0.95
+  min_reason_score: 0.5
+
+# Default thresholds - apply to any bank/company without an override.
+thresholds:
+  suspicious: 0.50       # combined score >= this => suspicious (MEDIUM)
+  high: 0.65
+  critical: 0.80
+  local_alert: 0.92      # a single profile above its alert level also flags
+  temporal_alert: 0.92
+  global_alert: 0.97
+  max_amount:            # hard limits per single transaction
+    bank_transfer: 15000
+    phone_recharge: 150
+    prepaid_card: 2500
+  hard_rule_score: 0.85  # score floor when a hard limit is broken
+  high_risk_countries: [KY, PA, VG, BZ, SC, RU, NG]
+  high_risk_country_boost: 0.10
+  night_hours: [0, 1, 2, 3, 4]
+  night_boost: 0.03
+
+# Per bank / company overrides. Only the keys you set are overridden.
+banks:
+  BANK001:
+    name: Mediterranea Bank (demo)
+    thresholds:
+      suspicious: 0.50
+  BANK002:
+    name: Nordwind Credit Union (demo)
+    thresholds:
+      suspicious: 0.45
+      high: 0.60
+      max_amount:
+        bank_transfer: 8000
+
+channels:
+  - name: Mock generator
+    type: mock
+    enabled: true
+    options:
+      customers: 150
+      history_days: 45
+      rate: 4.0              # transactions per real second
+      fraud_ratio: 0.03
+      history_fraud_ratio: 0.0
+      seed: 42
+  - name: TCP JSON-lines feed
+    type: tcp
+    enabled: false
+    options: {host: 127.0.0.1, port: 9009}
+  - name: HTTP webhook
+    type: http
+    enabled: false
+    options: {host: 127.0.0.1, port: 8088, path: /transactions}
+  - name: CSV drop folder
+    type: csv
+    enabled: false
+    options: {path: data/incoming.csv, follow: true, poll_seconds: 1.0}
+  - name: Core banking (SQLite)
+    type: sqlite
+    enabled: false
+    options: {path: data/core_bank.db, table: transactions, poll_seconds: 2.0}
+    # Example of a field mapping from a source schema to BankSealer fields:
+    field_mapping: {customer: user_id, value: amount}

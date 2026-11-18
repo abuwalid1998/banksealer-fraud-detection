@@ -1,0 +1,8 @@
+# BankSealer desktop application
+numpy>=1.24
+PyYAML>=6.0
+reportlab>=4.0
+matplotlib>=3.7
+PySide6>=6.5
+# tests
+pytest>=7.0
