@@ -57,6 +57,10 @@ class Settings:
     bootstrap_password: str = "Admin"
     require_mfa: bool = False                 # forced on in production
     cors_origins: list[str] = field(default_factory=list)
+    ssl_certfile: str = ""                    # PEM certificate (enables HTTPS)
+    ssl_keyfile: str = ""                     # PEM private key
+    log_file: str = ""                        # rotating log file (Windows service / server installs)
+    show_dev_accounts: bool = True            # list development accounts on the sign-in page
     background_jobs: bool = True
     engine_config: Path = ROOT / "config" / "banksealer.yaml"
 
@@ -134,6 +138,10 @@ def load_settings() -> Settings:
         require_mfa=_bool("VERISHIELD_REQUIRE_MFA", production),
         cors_origins=cors,
         background_jobs=_bool("VERISHIELD_BACKGROUND_JOBS", True),
+        ssl_certfile=os.environ.get("VERISHIELD_SSL_CERTFILE", ""),
+        ssl_keyfile=os.environ.get("VERISHIELD_SSL_KEYFILE", ""),
+        log_file=os.environ.get("VERISHIELD_LOG_FILE", ""),
+        show_dev_accounts=_bool("VERISHIELD_SHOW_DEV_ACCOUNTS", not production),
     )
 
 
