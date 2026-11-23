@@ -614,8 +614,9 @@ def render_pdf(doc: Doc, b: dict, number: str, generated_by: str, demo: bool, am
                                     + doc.title), title),
                    Paragraph(escape(doc.subtitle or ""), sub)]
     if doc.kpis:
+        kstyle = ParagraphStyle("k", parent=cell, leading=15)
         kp = [[Paragraph(f"<font size=7 color='#5B6B7F'>{escape(k.upper())}</font><br/>"
-                         f"<font size=12><b>{escape(_fmt(v))}</b></font>", cell) for k, v in doc.kpis[i:i + 4]]
+                         f"<font size=12><b>{escape(_fmt(v))}</b></font>", kstyle) for k, v in doc.kpis[i:i + 4]]
               for i in range(0, len(doc.kpis), 4)]
         for row in kp:
             row += [""] * (4 - len(row))
