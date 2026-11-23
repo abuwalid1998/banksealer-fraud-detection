@@ -105,6 +105,12 @@ def initialise(seed_demo: Optional[bool] = None, quiet: bool = False) -> dict:
                 log.warning("preparing synthetic Demo Mode data (first start only, ~20-60 s)...")
             summary["seed"] = demo.seed(db, settings.tenant_code, "installer")
             summary["seeded"] = True
+        elif seed_demo and settings.demo_live_channels:
+            from .models import Connector
+            has_channels = db.execute(select(Connector.id).where(Connector.tenant_id == settings.tenant_code,
+                                                                 Connector.space == "DEMO").limit(1)).scalar()
+            if not has_channels:          # installations seeded before live channels existed
+                demo.create_live_channels(db, settings.tenant_code, "installer")
         if settings.background_jobs:
             start_enabled(db)
     return summary
