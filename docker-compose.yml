@@ -1,0 +1,16 @@
+# VeriShield with Docker Compose (SQLite stored in a named volume)
+#   docker compose up --build        ->  http://localhost:8000
+# For PostgreSQL use:  docker compose -f docker-compose.postgres.yml up --build
+services:
+  verishield:
+    build: .
+    image: verishield:latest
+    ports: ["8000:8000"]
+    environment:
+      VERISHIELD_ENV: ${VERISHIELD_ENV:-development}
+      VERISHIELD_SECRET_KEY: ${VERISHIELD_SECRET_KEY:-}
+    volumes: [verishield-data:/data]
+    restart: unless-stopped
+
+volumes:
+  verishield-data:

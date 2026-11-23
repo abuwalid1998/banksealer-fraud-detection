@@ -1,0 +1,19 @@
+# One-click hosting on Render (https://render.com): New > Blueprint > select this repository/branch.
+# Uses the Dockerfile and a managed PostgreSQL database.
+services:
+  - type: web
+    name: verishield
+    runtime: docker
+    plan: starter
+    healthCheckPath: /ready
+    envVars:
+      - key: VERISHIELD_ENV
+        value: development        # change to production once real users are provisioned
+      - key: VERISHIELD_SECRET_KEY
+        generateValue: true
+      - key: DATABASE_URL
+        fromDatabase: {name: verishield-db, property: connectionString}
+    disk: {name: verishield-data, mountPath: /data, sizeGB: 1}
+databases:
+  - name: verishield-db
+    plan: basic-256mb
