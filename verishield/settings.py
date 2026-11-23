@@ -49,10 +49,18 @@ class Settings:
     seed_demo_users: bool = True              # create the other four initial accounts (temporary passwords)
     demo_customers: int = 180
     demo_history_days: int = 45
+    demo_live_channels: bool = True           # create & enable ready-to-use live channels in Demo Mode
+    demo_stream_rate: float = 0.5             # synthetic payments per second on the built-in stream
+    demo_tcp_port: int = 9009
+    demo_http_port: int = 9010
     bootstrap_username: str = "1000"
     bootstrap_password: str = "Admin"
     require_mfa: bool = False                 # forced on in production
     cors_origins: list[str] = field(default_factory=list)
+    ssl_certfile: str = ""                    # PEM certificate (enables HTTPS)
+    ssl_keyfile: str = ""                     # PEM private key
+    log_file: str = ""                        # rotating log file (Windows service / server installs)
+    show_dev_accounts: bool = True            # list development accounts on the sign-in page
     background_jobs: bool = True
     engine_config: Path = ROOT / "config" / "banksealer.yaml"
 
@@ -121,11 +129,19 @@ def load_settings() -> Settings:
         seed_demo_users=_bool("VERISHIELD_SEED_DEMO_USERS", not production),
         demo_customers=int(os.environ.get("VERISHIELD_DEMO_CUSTOMERS", "180")),
         demo_history_days=int(os.environ.get("VERISHIELD_DEMO_HISTORY_DAYS", "45")),
+        demo_live_channels=_bool("VERISHIELD_DEMO_LIVE_CHANNELS", True),
+        demo_stream_rate=float(os.environ.get("VERISHIELD_DEMO_STREAM_RATE", "0.5")),
+        demo_tcp_port=int(os.environ.get("VERISHIELD_DEMO_TCP_PORT", "9009")),
+        demo_http_port=int(os.environ.get("VERISHIELD_DEMO_HTTP_PORT", "9010")),
         bootstrap_username=os.environ.get("VERISHIELD_BOOTSTRAP_USERNAME", "1000"),
         bootstrap_password=os.environ.get("VERISHIELD_BOOTSTRAP_PASSWORD", "Admin"),
         require_mfa=_bool("VERISHIELD_REQUIRE_MFA", production),
         cors_origins=cors,
         background_jobs=_bool("VERISHIELD_BACKGROUND_JOBS", True),
+        ssl_certfile=os.environ.get("VERISHIELD_SSL_CERTFILE", ""),
+        ssl_keyfile=os.environ.get("VERISHIELD_SSL_KEYFILE", ""),
+        log_file=os.environ.get("VERISHIELD_LOG_FILE", ""),
+        show_dev_accounts=_bool("VERISHIELD_SHOW_DEV_ACCOUNTS", not production),
     )
 
 

@@ -31,8 +31,34 @@ Options: `python run_verishield.py --port 9000`, `--host 0.0.0.0` (reach it from
 `--no-demo` (no synthetic data). Data lives in `data/verishield/` (delete that folder for a clean start).
 
 On the first start VeriShield creates the **Bank of Palestine** tenant, the bootstrap IT Admin, the four
-other initial accounts and an isolated **Demo Mode** dataset (≈180 synthetic customers, 45 days of
-history, trained models, recent decisions, alerts and sample cases). This takes a few seconds.
+other initial accounts and the **Demo workspace** (≈180 customers, 45 days of history, trained models,
+recent decisions, alerts and sample cases). This takes a few seconds.
+
+### Live data channels (also in Demo Mode)
+
+Four live channels are created and enabled automatically in the Demo workspace. Everything they receive is
+scored in real time by the engine, AML indicators and rules, and the dashboards, transaction list, alert queue,
+customer scores and channel counters refresh on their own (the top bar shows the live scoring rate).
+
+| Channel | How to send data |
+|---|---|
+| Live payment stream | Built-in synthetic payment switch, 0.5 payments/s (`VERISHIELD_DEMO_STREAM_RATE`) |
+| TCP JSON-lines feed | one JSON transaction per line to `127.0.0.1:9009` |
+| HTTP webhook listener | `POST http://127.0.0.1:9010/transactions` with a JSON object or list |
+| CSV drop file | append rows to `data/verishield/incoming/transactions.csv` |
+| Decision / events API | create an API key in *Users & Settings › API clients*, then call `/api/v1/decisions/evaluate` |
+
+Feed realistic traffic for the demo customers from a second terminal:
+
+```bash
+python mock_channel/generate_transactions.py --verishield --output tcp --port 9009
+```
+```bash
+python mock_channel/generate_transactions.py --verishield --output http --url http://127.0.0.1:9010/transactions --batch 5
+```
+
+Any other connector (REST pull, database replica, file, TCP, HTTP) can also be added and enabled in Demo Mode.
+Only outbound payment actions (release / reject sent to the bank) are simulated in the Demo workspace.
 
 ### Sign-in accounts (development)
 
@@ -59,8 +85,8 @@ only in development; with `VERISHIELD_ENV=production` only the bootstrap admin i
 5. Back as **2000** → open the case → **Record disposition** (e.g. *Release transaction*: in Demo Mode the
    bank is simulated) → *Investigation report* (branded PDF).
 6. *Policies & Thresholds* → **New draft** → change a threshold → **Simulate impact** → **Publish**.
-7. **1000 (IT Admin)** → *Integrations & Channels* → add *Demo synthetic transaction stream* → Test → Enable:
-   live transactions start flowing. *Users & Settings*: users, security policy, branding & logo, API keys,
+7. **1000 (IT Admin)** → *Integrations & Channels*: the live channels are already running; watch the counters move,
+   or add another channel (Test → Enable). *Users & Settings*: users, security policy, branding & logo, API keys,
    Demo Mode reset. *Operations & Audit*: health, incidents, hash-chained audit trail.
 8. **4000 (Chief)** → executive oversight dashboard and reports.
 
@@ -133,7 +159,8 @@ web UI (vanilla JS SPA, no build)      MCP server (optional, stdio)      bank sy
 **Tenants and spaces.** Every record carries `tenant_id` (always taken from the authenticated
 credential). Operational records also carry `space` = `LIVE` or `DEMO`. Demo Mode switches the users'
 workspace to the DEMO namespace; API keys are bound to the space they were created in, so toggling Demo
-Mode never redirects a bank integration. Demo reset deletes only DEMO rows and artifacts.
+Mode never redirects a bank integration. Live channels run in both workspaces and score in real time; in the
+Demo workspace only outbound payment actions are simulated. Demo reset deletes only DEMO rows and artifacts.
 
 ---
 
@@ -176,7 +203,7 @@ POST /api/v1/decisions/evaluate          X-API-Key (scope decisions:write)
 | AML workflow | Alert triage/close, related alerts, cases & referrals, assignment, checklist, notes, evidence with SHA-256 and type/size checks, recommendation, Manager disposition, return/reopen, chronology |
 | Policies | Thresholds, actions, AML parameters, scoped rules, fallback, simulation, maker-checker, scheduled effective time, emergency rollback, diff |
 | Reports | 14 report types, PDF with tenant logo/colours/header/footer/notice/numbering/watermark/sign-off, CSV, XLSX, role-scoped |
-| Demo Mode | Synthetic namespace, banner, report watermark, simulated execution, scenario injector, live stream, audited reset that never touches LIVE (tested) |
+| Demo Mode | Separate Demo namespace with live channels and real-time scoring, banner, report watermark, simulated payment actions, scenario injector, audited reset that never touches LIVE (tested) |
 | Operations | `/health`, `/ready`, `/metrics`, latency percentiles, incidents workflow, hash-chained tamper-evident audit with verification (tested) |
 | MCP | `python -m verishield.mcp_server` with read-oriented tools via scoped API keys |
 

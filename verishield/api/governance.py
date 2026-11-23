@@ -131,6 +131,7 @@ def simulate(policy_id: str, body: dict = None, p: Principal = Depends(require("
 
 
 def _activate(db: Session, p: Principal, pv: PolicyVersion, reason: str) -> None:
+    policy_service.invalidate_policy_cache(p.tenant_id)
     now = utcnow()
     pv.status = "ACTIVE"
     pv.activated_at = now
@@ -139,6 +140,7 @@ def _activate(db: Session, p: Principal, pv: PolicyVersion, reason: str) -> None
                                                PolicyVersion.id != pv.id, PolicyVersion.version < pv.version)
                    .values(status="SUPERSEDED"))
     db.commit()
+    policy_service.invalidate_policy_cache(p.tenant_id)
     audit.record(db, p.tenant_id, "policy.publish", actor=p, resource_type="policy", resource_id=pv.id,
                  after={"effective_from": str(pv.effective_from or now), "reason": reason})
 

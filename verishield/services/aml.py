@@ -5,6 +5,7 @@ review, never a finding of money laundering.
 """
 from __future__ import annotations
 
+import math
 from datetime import timedelta
 from typing import Optional
 
@@ -61,7 +62,7 @@ class TxContext:
         others = self.db.execute(select(func.count(func.distinct(Transaction.customer_ref))).where(
             Transaction.tenant_id == self.tenant_id, Transaction.space == self.space,
             Transaction.beneficiary == ben, Transaction.customer_ref != self.tx.user_id,
-            Transaction.ts >= since)).scalar() or 0
+            Transaction.ts >= since, Transaction.ts <= self.tx.timestamp)).scalar() or 0
         return int(others) + 1
 
 
@@ -84,9 +85,14 @@ def evaluate(ctx: TxContext, customer: Optional[Customer], cfg: dict, high_risk_
                                "message": f"{len(near) + 1} transactions between {lo:,.0f} and {threshold:,.0f} "
                                           f"within {window:.0f}h (just below the reporting threshold)"})
 
-    # Rapid movement of funds / velocity.
+    # Rapid movement of funds / velocity - relative to the customer's declared activity when known.
     count = ctx.velocity(window)
-    if count >= int(cfg.get("velocity_count", 8)):
+    velocity_limit = int(cfg.get("velocity_count", 8))
+    if customer is not None and customer.expected_monthly_tx:
+        expected_in_window = customer.expected_monthly_tx / 30.0 * (window / 24.0)
+        velocity_limit = max(velocity_limit,
+                             math.ceil(float(cfg.get("velocity_expected_multiplier", 4.0)) * expected_in_window))
+    if count >= velocity_limit:
         total = sum(r.amount for r in ctx.recent(window)) + tx.amount
         indicators.append({"code": "RAPID_MOVEMENT_OF_FUNDS", "weight": 0.35,
                            "message": f"{count} transactions totalling {total:,.2f} within {window:.0f}h"})
@@ -95,7 +101,10 @@ def evaluate(ctx: TxContext, customer: Optional[Customer], cfg: dict, high_risk_
     if customer is not None and customer.expected_monthly_turnover:
         month = sum(r.amount for r in ctx.recent(24 * 30)) + tx.amount
         mult = float(cfg.get("turnover_multiplier", 2.5))
-        if month > customer.expected_monthly_turnover * mult:
+        limit = max(customer.expected_monthly_turnover * mult,
+                    customer.expected_monthly_turnover + float(cfg.get("turnover_min_excess", 3000)))
+        # customer-level breach: raised by the transaction that crosses the limit, not by every later one
+        if month - tx.amount < limit <= month:
             indicators.append({"code": "TURNOVER_ABOVE_EXPECTED", "weight": 0.4,
                                "message": f"30-day turnover {month:,.2f} exceeds {mult:g}x the declared expected "
                                           f"monthly turnover {customer.expected_monthly_turnover:,.2f}"})

@@ -266,7 +266,7 @@ def _customer_masked(p: Principal) -> bool:
 
 @router.get("/customers")
 def list_customers(search: str = "", segment: Optional[int] = None, risk: str = "", customer_type: str = "",
-                   history: str = "", page: int = 1, page_size: int = Query(50, le=500),
+                   history: str = "", sort: str = "", page: int = 1, page_size: int = Query(50, le=500),
                    p: Principal = Depends(require("customers.view_full", "customers.view_masked",
                                                   "customers.view_assigned")),
                    db: Session = Depends(get_db)):
@@ -287,7 +287,24 @@ def list_customers(search: str = "", segment: Optional[int] = None, risk: str = 
     alerts = dict(db.execute(select(Alert.customer_ref, func.count()).where(
         Alert.tenant_id == p.tenant_id, Alert.space == p.space, Alert.status.in_(("OPEN", "TRIAGED", "IN_CASE")))
         .group_by(Alert.customer_ref)).all())
+    since30 = utcnow() - timedelta(days=30)
+    live: dict = {}
+    for ref, ts, score, dec in db.execute(select(Decision.customer_ref, Decision.issued_at, Decision.fraud_score,
+                                                 Decision.decision).where(
+            Decision.tenant_id == p.tenant_id, Decision.space == p.space, Decision.issued_at >= since30,
+            Decision.decision != "ERROR_POLICY").order_by(Decision.issued_at.desc())):
+        entry = live.get(ref)
+        if entry is None:
+            live[ref] = {"latest_score": score, "latest_decision": dec, "latest_at": ts, "max_score_30d": score,
+                         "decisions_30d": 1}
+        else:
+            entry["max_score_30d"] = max(entry["max_score_30d"], score)
+            entry["decisions_30d"] += 1
     rows = db.execute(q.order_by(Customer.customer_ref)).scalars().all()
+    if sort == "risk":
+        rows.sort(key=lambda c: -(live.get(c.customer_ref) or {}).get("max_score_30d", -1))
+    elif sort == "recent":
+        rows.sort(key=lambda c: (live.get(c.customer_ref) or {}).get("latest_at") or datetime.min, reverse=True)
     if history == "limited":
         rows = [c for c in rows if counts.get(c.customer_ref, 0) < segmentation.MIN_HISTORY]
     elif history == "established":
@@ -303,7 +320,9 @@ def list_customers(search: str = "", segment: Optional[int] = None, risk: str = 
                       "risk_category": c.risk_category if not masked else None, "segment_key": c.segment_key,
                       "segment_label": c.segment_label, "segment_confidence": c.segment_confidence,
                       "transactions": n, "open_alerts": alerts.get(c.customer_ref, 0) if not masked else None,
-                      "limited_history": n < segmentation.MIN_HISTORY, "kyc_review_status": c.kyc_review_status})
+                      "limited_history": n < segmentation.MIN_HISTORY, "kyc_review_status": c.kyc_review_status,
+                      **({k: iso(v) for k, v in (live.get(c.customer_ref) or {}).items()} if not masked else
+                         {"max_score_30d": (live.get(c.customer_ref) or {}).get("max_score_30d")})})
     return {"total": total, "page": page, "items": items}
 
 
@@ -437,6 +456,32 @@ def triage_alert(alert_id: str, body: dict, p: Principal = Depends(require("aler
     except case_service.CaseError as exc:
         raise HTTPException(exc.status, {"code": "CASE_ERROR", "message": exc.message}) from exc
     return {"alert": row_dict(a)}
+
+
+# --------------------------------------------------------------------------- live pulse
+@router.get("/live/pulse")
+def live_pulse(p: Principal = Depends(require()), db: Session = Depends(get_db)):
+    """Lightweight real-time indicator: decisions scored in the last minutes and running channels."""
+    from ..services.connectors import runtime
+    now = utcnow()
+    base = (Decision.tenant_id == p.tenant_id) & (Decision.space == p.space)
+    last_min = db.execute(select(func.count(Decision.id)).where(base, Decision.issued_at >= now - timedelta(minutes=1)))\
+        .scalar()
+    last_5 = db.execute(select(func.count(Decision.id)).where(base, Decision.issued_at >= now - timedelta(minutes=5)))\
+        .scalar()
+    last = db.execute(select(Decision).where(base).order_by(Decision.issued_at.desc()).limit(1)).scalar()
+    conns = db.execute(select(Connector.id).where(Connector.tenant_id == p.tenant_id, Connector.space == p.space,
+                                                  Connector.status.in_(("ENABLED", "DEGRADED")))).scalars().all()
+    running = sum(1 for cid in conns if runtime.status(cid).get("running"))
+    open_alerts = db.execute(select(func.count(Alert.id)).where(
+        Alert.tenant_id == p.tenant_id, Alert.space == p.space, Alert.status.in_(("OPEN", "TRIAGED")))).scalar() \
+        if p.can("alerts.view_all") else None
+    return {"space": p.space, "now": iso(now), "decisions_last_minute": last_min, "decisions_last_5_minutes": last_5,
+            "channels_running": running, "channels_enabled": len(conns), "open_alerts": open_alerts,
+            "model_ready": engine_registry.workspace(p.tenant_id, p.space).ready,
+            "last_decision": None if last is None or not p.can("tx.view_full", "tx.view_masked") else
+            {"at": iso(last.issued_at), "decision": last.decision, "fraud_score": last.fraud_score,
+             "tx_ref": last.tx_ref if p.can("tx.view_full") else mask(last.tx_ref)}}
 
 
 # --------------------------------------------------------------------------- dashboards

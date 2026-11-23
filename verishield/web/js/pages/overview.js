@@ -2,20 +2,24 @@
 import { api } from "../api.js";
 import { navigate } from "../app.js";
 import { COLORS, S, card, chip, codes, decisionChip, donut, empty, esc, fmtDate, fmtMoney, fmtNum, fmtRel, hbars,
-  kpi, label, stackedBars, table } from "../ui.js";
+  kpi, label, live, liveBadge, stackedBars, table } from "../ui.js";
 
 const OUT = ["PASS", "REVIEW", "HOLD", "DECLINE", "ERROR_POLICY"];
 
 export async function render(el) {
-  const d = await api.get("/dashboard");
-  const role = d.role;
-  const hello = `<div class="row" style="margin-bottom:16px"><div><h2 style="font-size:18px">Welcome, ${esc(S.me.user.first_name || S.me.user.name)}</h2>
-    <div class="muted small">${esc(S.me.user.role_label)} workspace · ${d.space === "DEMO" ? "Demo Mode – figures are synthetic" : "Live data"} · updated ${fmtDate(d.generated_at)}</div></div>
-    <span class="spacer"></span><span class="small muted">Policy <b>${esc(d.models_summary.policy || "–")}</b> · Fraud model <b>${esc(d.models_summary.fraud || "not trained")}</b></span></div>`;
-  if (role === "IT_ADMIN") el.innerHTML = hello + itAdmin(d);
-  else if (role === "AML_EMPLOYEE") el.innerHTML = hello + employee(d);
-  else el.innerHTML = hello + manager(d, role === "CHIEF_AML");
-  el.querySelectorAll("[data-go]").forEach((a) => a.addEventListener("click", (e) => { e.preventDefault(); navigate(a.dataset.go); }));
+  const draw = async () => {
+    const d = await api.get("/dashboard");
+    const role = d.role;
+    const hello = `<div class="row" style="margin-bottom:16px"><div><h2 style="font-size:18px">Welcome, ${esc(S.me.user.first_name || S.me.user.name)}</h2>
+      <div class="muted small">${esc(S.me.user.role_label)} workspace · ${d.space === "DEMO" ? "Demo workspace (live scoring, simulated payment actions)" : "Live workspace"} · ${liveBadge("AUTO-REFRESH")} updated ${fmtDate(d.generated_at, { seconds: true })}</div></div>
+      <span class="spacer"></span><span class="small muted">Policy <b>${esc(d.models_summary.policy || "–")}</b> · Fraud model <b>${esc(d.models_summary.fraud || "not trained")}</b></span></div>`;
+    if (role === "IT_ADMIN") el.innerHTML = hello + itAdmin(d);
+    else if (role === "AML_EMPLOYEE") el.innerHTML = hello + employee(d);
+    else el.innerHTML = hello + manager(d, role === "CHIEF_AML");
+    el.querySelectorAll("[data-go]").forEach((a) => a.addEventListener("click", (e) => { e.preventDefault(); navigate(a.dataset.go); }));
+  };
+  await draw();
+  live(el, 10000, draw);
 }
 
 function manager(d, chief) {

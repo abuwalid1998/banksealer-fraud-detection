@@ -11,3 +11,5 @@ reports/*
 data/verishield/
 .env
 .venv/
+# offline bundles built by deploy/windows/build_offline_bundle.py
+dist/

@@ -13,6 +13,7 @@ Open **http://localhost:8000**, sign in with `1000` / `Admin` (IT Admin – you 
 password). Development accounts for the other roles are listed on the sign-in page:
 `2000` AML Manager, `3001`/`3002` AML Employees, `4000` Chief AML/Compliance.
 Docker: `docker compose up --build` (or `docker compose -f docker-compose.postgres.yml up --build`).
+Windows Server without internet: see [`deploy/windows/README.md`](deploy/windows/README.md) (offline bundle + one-click installer).
 
 ![VeriShield](docs/verishield/screenshots/manager-overview.png)
 

@@ -76,7 +76,7 @@ def create_app() -> FastAPI:
                   description="Transaction Intelligence. Trusted Decisions. - fraud risk decisioning, customer "
                               "intelligence and AML case management. Authenticate users with `POST /api/v1/auth/login` "
                               "(Bearer token) and systems with an `X-API-Key` header.",
-                  docs_url="/api/docs", redoc_url="/api/redoc", openapi_url="/api/openapi.json")
+                  docs_url=None, redoc_url=None, openapi_url="/api/openapi.json")
 
     if settings.cors_origins:
         app.add_middleware(CORSMiddleware, allow_origins=settings.cors_origins, allow_credentials=False,
@@ -104,6 +104,8 @@ def create_app() -> FastAPI:
         response.headers["X-Response-Time-ms"] = f"{ms:.1f}"
         if path.startswith("/api/"):
             response.headers["Cache-Control"] = "no-store"
+        if settings.ssl_certfile:
+            response.headers["Strict-Transport-Security"] = "max-age=31536000"
         return response
 
     @app.exception_handler(RequestValidationError)
@@ -127,6 +129,15 @@ def create_app() -> FastAPI:
     app.include_router(admin.health_router)
 
     app.mount("/static", StaticFiles(directory=WEB), name="static")
+
+    @app.get("/api/docs", include_in_schema=False)
+    def api_docs():
+        from fastapi.openapi.docs import get_swagger_ui_html
+        # assets are served locally so the documentation also works on servers without internet access
+        return get_swagger_ui_html(openapi_url="/api/openapi.json", title="VeriShield API",
+                                   swagger_js_url="/static/vendor/swagger-ui/swagger-ui-bundle.js",
+                                   swagger_css_url="/static/vendor/swagger-ui/swagger-ui.css",
+                                   swagger_favicon_url="/static/logo.svg")
 
     @app.get("/", include_in_schema=False)
     def index():

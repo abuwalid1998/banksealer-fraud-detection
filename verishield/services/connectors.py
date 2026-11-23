@@ -6,6 +6,9 @@ Secrets are never stored in connector configuration: a connector holds a ``secre
 (``vault:<id>`` for the encrypted local vault, or ``env:<NAME>`` for an environment variable /
 external secrets manager injection). Secret values are never returned by the API.
 
+Every inbound channel works in both workspaces: in Demo Mode, live channels feed the Demo workspace and
+every record is scored in real time; only outbound payment actions are simulated there.
+
 Runtime adapters bundled in this build: REST webhook (VeriShield API), REST pull, TCP JSON-lines,
 HTTP listener, CSV/JSONL file drop, database read replica (any SQLAlchemy URL) and the Demo synthetic
 stream. Kafka / RabbitMQ / JMS / SFTP connectors are registered, tested (network reachability)
@@ -141,8 +144,6 @@ def validate(data: dict, space: str) -> None:
         raise ConnectorError(422, f"type must be one of {', '.join(CONNECTOR_TYPES)}")
     if CONNECTOR_TYPES[ctype].get("demo_only") and space != "DEMO":
         raise ConnectorError(422, "the synthetic stream connector is only available in Demo Mode")
-    if space == "DEMO" and data.get("environment") == "PROD":
-        raise ConnectorError(422, "production connectors cannot be created from the Demo Mode workspace")
     cfg = data.get("config") or {}
     for key in ("password", "token", "secret", "api_key", "apikey"):
         if key in {k.lower() for k in cfg}:
@@ -588,8 +589,6 @@ def start_enabled(db: Session) -> None:
 def set_state(db: Session, c: Connector, action: str, actor: str, demo_workspace: bool) -> Connector:
     info = CONNECTOR_TYPES.get(c.type, {})
     if action == "enable":
-        if demo_workspace and (c.space != "DEMO" or c.environment == "PROD"):
-            raise ConnectorError(403, "production connectors cannot be activated from the Demo Mode workspace")
         if c.status not in ("VALIDATED", "DISABLED", "DEGRADED"):
             raise ConnectorError(409, "test the connection successfully before enabling")
         if not c.last_test_ok:

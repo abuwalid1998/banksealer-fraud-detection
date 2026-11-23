@@ -53,7 +53,9 @@ DEFAULT_POLICY: dict[str, Any] = {
         "structuring_band": 0.15,
         "structuring_count": 3,
         "velocity_count": 8,
+        "velocity_expected_multiplier": 4.0,
         "turnover_multiplier": 2.5,
+        "turnover_min_excess": 3000,
         "shared_counterparty_customers": 3,
         "shared_counterparty_days": 7,
         "high_risk_customer_amount": 5000,
@@ -146,7 +148,30 @@ def validate_document(doc: dict) -> list[str]:
 
 
 # --------------------------------------------------------------------------- persistence
+_policy_cache: dict = {}
+POLICY_CACHE_SECONDS = 2.0
+
+
+def invalidate_policy_cache(tenant_id: str | None = None) -> None:
+    if tenant_id is None:
+        _policy_cache.clear()
+    else:
+        _policy_cache.pop(tenant_id, None)
+
+
 def active_policy(db: Session, tenant_id: str) -> PolicyVersion:
+    """Active policy version (cached for a couple of seconds on the hot decision path)."""
+    import time as _t
+    hit = _policy_cache.get(tenant_id)
+    if hit and _t.monotonic() - hit[0] < POLICY_CACHE_SECONDS:
+        return hit[1]
+    pv = _active_policy(db, tenant_id)
+    db.expunge(pv) if pv in db else None
+    _policy_cache[tenant_id] = (_t.monotonic(), pv)
+    return pv
+
+
+def _active_policy(db: Session, tenant_id: str) -> PolicyVersion:
     now = utcnow()
     rows = db.execute(select(PolicyVersion).where(PolicyVersion.tenant_id == tenant_id,
                                                    PolicyVersion.status == "ACTIVE")
@@ -255,12 +280,17 @@ def combine(doc: dict, risk_level: str, rule_hits: list[dict], aml_level: str, u
 
 
 # --------------------------------------------------------------------------- simulation
-def simulate(db: Session, tenant_id: str, space: str, doc: dict, days: int = 30, limit: int = 20000) -> dict:
-    """Re-apply ``doc`` to stored profile scores of recent decisions (no rescoring, no side effects).
+def simulate(db: Session, tenant_id: str, space: str, doc: dict, days: int = 30, limit: int = 3000) -> dict:
+    """Live what-if: re-evaluate recent decisions under ``doc`` (no side effects, nothing is rewritten).
 
-    The original operational decisions are untouched; this is an analytical preview.
+    For every decision the draft's thresholds and outcome mapping are applied to the stored profile scores,
+    and the draft's AML indicators and business rules are recomputed live from the transaction data as it was
+    at that moment (activity windows, beneficiary history, declared customer profile).
     """
-    from .engine_registry import make_decider
+    from banksealer.models import Transaction as ETx  # noqa: F401
+    from ..models import Customer
+    from . import aml as aml_service
+    from .engine_registry import make_decider, to_engine
 
     since = utcnow() - timedelta(days=days)
     rows = db.execute(select(Decision, Transaction).join(Transaction, (Transaction.tenant_id == Decision.tenant_id)
@@ -273,19 +303,37 @@ def simulate(db: Session, tenant_id: str, space: str, doc: dict, days: int = 30,
     by_type: dict[str, Count] = {}
     changed = []
     decider = make_decider(doc["engine_thresholds"], tenant_id)
+    hrc = doc.get("engine_thresholds", {}).get("high_risk_countries", [])
+    customers: dict = {}
+    aml_changes = rule_changes = 0
     for dec, tx in rows:
         level, hard = decider.level(dec, tx)
-        hits = [h for h in (dec.rule_hits or []) if h.get("kind") == "policy_rule"]
-        rule_ids = {r["id"]: r for r in doc.get("rules", [])}
-        hits = [{"id": h["id"], "action": rule_ids[h["id"]]["action"]} for h in hits
-                if h["id"] in rule_ids and rule_ids[h["id"]].get("enabled", True)]
-        outcome, _ = combine(doc, level, hits, dec.aml_signal_level, dec.undertrained, hard)
+        etx = to_engine(tx)
+        if tx.customer_ref not in customers:
+            customers[tx.customer_ref] = db.execute(select(Customer).where(
+                Customer.tenant_id == tenant_id, Customer.space == space,
+                Customer.customer_ref == tx.customer_ref)).scalar()
+        cust = customers[tx.customer_ref]
+        ctx = aml_service.TxContext(db, tenant_id, space, etx)
+        aml = aml_service.evaluate(ctx, cust, doc.get("aml", {}), hrc)
+        rule_ctx = {"tx_type": tx.tx_type, "channel": tx.channel, "mode": tx.mode, "amount": tx.amount,
+                    "segment_key": cust.segment_key if cust else None,
+                    "customer_type": cust.customer_type if cust else None,
+                    "customer_risk": cust.risk_category if cust else None, "beneficiary_country": etx.iban_cc,
+                    "ip_country": etx.ip_country, "hour": tx.ts.hour, "new_beneficiary": ctx.new_beneficiary(),
+                    "velocity": ctx.velocity}
+        hits = [{"id": r["id"], "action": r["action"]} for r in doc.get("rules", []) if rule_matches(r, rule_ctx)]
+        old_hits = {h["id"] for h in (dec.rule_hits or []) if h.get("kind") == "policy_rule"}
+        aml_changes += int(aml["level"] != dec.aml_signal_level)
+        rule_changes += int({h["id"] for h in hits} != old_hits)
+        outcome, _ = combine(doc, level, hits, aml["level"], dec.undertrained, hard)
         current[dec.decision] += 1
         proposed[outcome] += 1
         by_type.setdefault(tx.tx_type, Count())[outcome] += 1
         if outcome != dec.decision and len(changed) < 50:
             changed.append({"tx_ref": dec.tx_ref, "customer_ref": dec.customer_ref, "amount": tx.amount,
-                            "fraud_score": dec.fraud_score, "current": dec.decision, "proposed": outcome})
+                            "fraud_score": dec.fraud_score, "current": dec.decision, "proposed": outcome,
+                            "aml": aml["level"], "rules": [h["id"] for h in hits]})
     total = len(rows)
     return {
         "evaluated": total, "days": days,
@@ -293,7 +341,9 @@ def simulate(db: Session, tenant_id: str, space: str, doc: dict, days: int = 30,
         "proposed": {o: proposed.get(o, 0) for o in OUTCOMES},
         "delta": {o: proposed.get(o, 0) - current.get(o, 0) for o in OUTCOMES},
         "by_tx_type": {k: {o: v.get(o, 0) for o in OUTCOMES} for k, v in by_type.items()},
+        "aml_signal_changes": aml_changes, "rule_hit_changes": rule_changes,
         "changed_examples": changed,
-        "note": "Simulation re-applies thresholds/actions to stored profile scores. New rule conditions are "
-                "evaluated on the next live decisions; original decisions are never rewritten.",
+        "note": "Live re-evaluation: thresholds, AML indicators and business rules of this version were recomputed "
+                "for every decision from the transaction data as it was at that time. Original decisions are never "
+                "rewritten.",
     }

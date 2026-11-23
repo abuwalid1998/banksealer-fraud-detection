@@ -259,7 +259,8 @@ class Transaction(Base):
     __tablename__ = "transactions"
     __table_args__ = (UniqueConstraint("tenant_id", "space", "tx_ref", name="uq_tx"),
                       Index("ix_tx_tenant_customer_ts", "tenant_id", "space", "customer_ref", "ts"),
-                      Index("ix_tx_tenant_ts", "tenant_id", "space", "ts"))
+                      Index("ix_tx_tenant_ts", "tenant_id", "space", "ts"),
+                      Index("ix_tx_beneficiary", "tenant_id", "space", "beneficiary", "ts"))
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     tenant_id: Mapped[str] = mapped_column(String(16))
     space: Mapped[str] = mapped_column(String(8), default="LIVE")

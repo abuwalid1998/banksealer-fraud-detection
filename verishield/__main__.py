@@ -6,6 +6,8 @@
     python -m verishield create-tenant CODE "Legal name" [--currency USD] [--timezone UTC]
     python -m verishield create-api-key NAME --scopes decisions:write,events:write [--tenant BOP] [--space LIVE]
     python -m verishield verify-audit [--tenant BOP]
+    python -m verishield make-cert --self-signed --hosts srv01,srv01.bank.local,10.1.2.3 --out C:\\VeriShield\\certs
+    python -m verishield make-cert --pfx server.pfx --password-env PFX_PASSWORD --out C:\\VeriShield\\certs
 """
 from __future__ import annotations
 
@@ -14,17 +16,29 @@ import logging
 import sys
 
 
+def _setup_logging(log_file: str) -> None:
+    handlers: list[logging.Handler] = [logging.StreamHandler()]
+    if log_file:
+        from logging.handlers import RotatingFileHandler
+        import os
+        os.makedirs(os.path.dirname(os.path.abspath(log_file)), exist_ok=True)
+        handlers.append(RotatingFileHandler(log_file, maxBytes=10 * 1024 * 1024, backupCount=10, encoding="utf-8"))
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)-7s %(name)s: %(message)s",
+                        handlers=handlers, force=True)
+
+
 def _banner(host: str, port: int) -> None:
     from .bootstrap import DEMO_USERS
     from .models import ROLE_LABELS
     from .settings import settings
 
     shown = "localhost" if host in ("0.0.0.0", "127.0.0.1") else host
+    scheme = "https" if settings.ssl_certfile else "http"
     lines = [
         "",
         "  VeriShield - Transaction Intelligence. Trusted Decisions.",
-        f"  Web app:   http://{shown}:{port}",
-        f"  API docs:  http://{shown}:{port}/api/docs",
+        f"  Web app:   {scheme}://{shown}:{port}",
+        f"  API docs:  {scheme}://{shown}:{port}/api/docs",
         f"  Data dir:  {settings.data_dir}",
         f"  Database:  {settings.database_url.split('@')[-1] if '@' in settings.database_url else settings.database_url}",
         "",
@@ -37,7 +51,7 @@ def _banner(host: str, port: int) -> None:
         for username, first, last, _, role, password in DEMO_USERS:
             lines.append(f"     {username}  {password:<15} {ROLE_LABELS[role]} ({first} {last})")
     lines.append("")
-    print("\n".join(lines), flush=True)
+    logging.getLogger("verishield").info("\n".join(lines))
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -60,13 +74,32 @@ def main(argv: list[str] | None = None) -> int:
     k.add_argument("--scopes", default="decisions:write,events:write,execution:write")
     k.add_argument("--tenant")
     k.add_argument("--space", default="LIVE", choices=["LIVE", "DEMO"])
+    k.add_argument("--rate-limit", type=int, default=600, help="requests per minute (default 600)")
+    mc = sub.add_parser("make-cert", help="create PEM certificate files for HTTPS")
+    mc.add_argument("--self-signed", action="store_true", help="generate a self-signed certificate")
+    mc.add_argument("--hosts", default="localhost", help="comma separated host names / IP addresses (SAN)")
+    mc.add_argument("--pfx", help="convert an existing PFX/P12 certificate (e.g. issued by the bank's CA)")
+    mc.add_argument("--password-env", default="", help="environment variable holding the PFX password")
+    mc.add_argument("--out", required=True, help="output folder for cert.pem / key.pem")
     v = sub.add_parser("verify-audit", help="verify the tamper-evident audit chain")
     v.add_argument("--tenant")
     args = parser.parse_args(argv)
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)-7s %(name)s: %(message)s")
-
     from .settings import settings
+    _setup_logging(settings.log_file)
     cmd = args.cmd or "serve"
+    if cmd == "make-cert":
+        from .certs import make_self_signed, pfx_to_pem
+        import os
+        if args.pfx:
+            out = pfx_to_pem(args.pfx, os.environ.get(args.password_env, "") if args.password_env else "", args.out)
+        elif args.self_signed:
+            out = make_self_signed([h.strip() for h in args.hosts.split(",") if h.strip()], args.out)
+        else:
+            print("use --self-signed or --pfx", file=sys.stderr)
+            return 2
+        print(f"certificate: {out['cert']}\nprivate key: {out['key']}\nexpires: {out['expires']}\n"
+              f"SHA-1 thumbprint: {out['thumbprint']}" + (f"\nclient trust file: {out['cer']}" if out.get("cer") else ""))
+        return 0
     if cmd == "serve":
         import uvicorn
         if getattr(args, "no_demo", False):
@@ -74,8 +107,11 @@ def main(argv: list[str] | None = None) -> int:
         host = getattr(args, "host", None) or settings.host
         port = getattr(args, "port", None) or settings.port
         _banner(host, port)
+        ssl = {}
+        if settings.ssl_certfile:
+            ssl = {"ssl_certfile": settings.ssl_certfile, "ssl_keyfile": settings.ssl_keyfile or None}
         uvicorn.run("verishield.app:app", host=host, port=port, reload=getattr(args, "reload", False),
-                    log_level="info", proxy_headers=True, forwarded_allow_ips="*")
+                    log_level="info", proxy_headers=True, forwarded_allow_ips="*", log_config=None, **ssl)
         return 0
 
     from .bootstrap import initialise
@@ -116,7 +152,8 @@ def main(argv: list[str] | None = None) -> int:
         key, prefix, hashed = new_api_key()
         with session_scope() as db:
             db.add(ApiClient(tenant_id=(args.tenant or settings.tenant_code).upper(), space=args.space, name=args.name,
-                             key_prefix=prefix, key_hash=hashed, scopes=scopes, created_by="cli"))
+                             key_prefix=prefix, key_hash=hashed, scopes=scopes, created_by="cli",
+                             rate_limit_per_minute=args.rate_limit))
         print(f"API key (shown once): {key}")
         return 0
     if cmd == "verify-audit":

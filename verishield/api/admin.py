@@ -316,7 +316,7 @@ def public_info(db: Session = Depends(get_db)):
             "primary_color": b["primary_color"], "accent_color": b["accent_color"],
             "logo": f"/api/v1/public/logo/{t.id}" if b.get("logo_key") else None,
             "environment": settings.env, "bootstrap_pending": bootstrap_pending,
-            "dev_accounts": settings.seed_demo_users and settings.env == "development"}
+            "dev_accounts": settings.seed_demo_users and settings.env == "development" and settings.show_dev_accounts}
 
 
 # --------------------------------------------------------------------------- API clients
