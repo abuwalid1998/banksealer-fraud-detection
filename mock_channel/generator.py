@@ -33,6 +33,7 @@ HOME_ASNS = {
     "IT": [("AS3269", (79, 151)), ("AS30722", (5, 87)), ("AS1267", (151, 2))],
     "DE": [("AS3320", (84, 91)), ("AS3209", (88, 64)), ("AS6805", (89, 12))],
     "FR": [("AS3215", (90, 2)), ("AS12322", (82, 64)), ("AS15557", (78, 192))],
+    "PS": [("AS12975", (213, 6)), ("AS15975", (213, 244)), ("AS51407", (37, 8))],
 }
 FOREIGN_ASNS = [("NL", "AS60781", (37, 48)), ("US", "AS14061", (159, 65)), ("RU", "AS12389", (95, 24)),
                 ("RO", "AS8708", (86, 120)), ("NG", "AS37148", (197, 210)), ("PA", "AS52468", (190, 97)),
@@ -40,10 +41,11 @@ FOREIGN_ASNS = [("NL", "AS60781", (37, 48)), ("US", "AS14061", (159, 65)), ("RU"
 FRAUD_IBAN_COUNTRIES = ["LT", "RO", "CY", "MT", "BG", "GB", "KY", "PA", "RU", "AE"]
 EU_IBAN_COUNTRIES = ["DE", "FR", "ES", "NL", "AT", "BE", "IT", "PT"]
 BBAN_LENGTH = {"IT": 23, "DE": 18, "FR": 23, "ES": 20, "NL": 14, "AT": 16, "BE": 12, "PT": 21, "LT": 16,
-               "RO": 20, "CY": 24, "MT": 27, "BG": 18, "GB": 18, "KY": 26, "PA": 20, "RU": 29, "AE": 19}
+               "RO": 20, "CY": 24, "MT": 27, "BG": 18, "GB": 18, "KY": 26, "PA": 20, "RU": 29, "AE": 19,
+               "PS": 25, "JO": 26}
 OPERATORS = {"IT": ["TIM", "Vodafone", "WindTre", "Iliad"], "DE": ["Telekom", "Vodafone", "O2"],
-             "FR": ["Orange", "SFR", "Bouygues", "Free"]}
-PHONE_PREFIX = {"IT": "+39 3", "DE": "+49 15", "FR": "+33 6"}
+             "FR": ["Orange", "SFR", "Bouygues", "Free"], "PS": ["Jawwal", "Ooredoo"]}
+PHONE_PREFIX = {"IT": "+39 3", "DE": "+49 15", "FR": "+33 6", "PS": "+970 59"}
 RECHARGE_AMOUNTS = [5, 10, 15, 20, 25, 30, 50]
 DEFAULT_BANKS = {"BANK001": "IT", "BANK002": "DE"}
 
@@ -59,6 +61,8 @@ def make_iban(rng: random.Random, country: str) -> str:
     if country == "IT":
         bban = rng.choice(string.ascii_uppercase) + "".join(rng.choices(string.digits, k=10)) + \
             "".join(rng.choices(string.digits + string.ascii_uppercase, k=12))
+    elif country in ("PS", "JO"):
+        bban = "".join(rng.choices(string.ascii_uppercase, k=4)) + "".join(rng.choices(string.digits, k=length - 4))
     else:
         bban = "".join(rng.choices(string.digits, k=length))
     return f"{country}{iban_check_digits(country, bban)}{bban}"
@@ -99,8 +103,9 @@ class Customer:
 
 class TransactionGenerator:
     def __init__(self, n_customers: int = 150, banks: Optional[dict] = None, seed: Optional[int] = None,
-                 fraud_ratio: float = 0.03, start: Optional[datetime] = None):
+                 fraud_ratio: float = 0.03, start: Optional[datetime] = None, currency: str = "EUR"):
         self.rng = random.Random(seed)
+        self.currency = currency
         self.banks = banks or dict(DEFAULT_BANKS)
         self.fraud_ratio = fraud_ratio
         self.customers = [self._make_customer(i) for i in range(n_customers)]
@@ -156,7 +161,7 @@ class TransactionGenerator:
         return {
             "tx_id": self._next_id(), "bank_id": c.bank_id, "user_id": c.user_id,
             "timestamp": ts.isoformat(sep=" ", timespec="seconds"), "tx_type": tx_type,
-            "amount": round(amount, 2), "currency": "EUR", "iban": None, "ip": ip[0], "cc_asn": ip[1],
+            "amount": round(amount, 2), "currency": self.currency, "iban": None, "ip": ip[0], "cc_asn": ip[1],
             "session_id": uuid.UUID(int=self.rng.getrandbits(128)).hex[:16], "card_id": None,
             "phone_number": None, "operator": None, "is_fraud": 1 if fraud else 0, "scenario": fraud or "",
         }

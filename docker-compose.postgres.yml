@@ -1,0 +1,32 @@
+# VeriShield + PostgreSQL 16
+#   docker compose -f docker-compose.postgres.yml up --build   ->  http://localhost:8000
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: verishield
+      POSTGRES_USER: verishield
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-verishield}
+    volumes: [pgdata:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U verishield"]
+      interval: 5s
+      retries: 20
+    restart: unless-stopped
+
+  verishield:
+    build: .
+    image: verishield:latest
+    ports: ["8000:8000"]
+    environment:
+      VERISHIELD_ENV: ${VERISHIELD_ENV:-development}
+      VERISHIELD_SECRET_KEY: ${VERISHIELD_SECRET_KEY:-}
+      DATABASE_URL: postgresql://verishield:${POSTGRES_PASSWORD:-verishield}@postgres:5432/verishield
+    volumes: [verishield-data:/data]
+    depends_on:
+      postgres: {condition: service_healthy}
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+  verishield-data:

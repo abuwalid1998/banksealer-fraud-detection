@@ -7,3 +7,7 @@ data/*.jsonl
 reports/*
 !reports/.gitkeep
 !data/.gitkeep
+# VeriShield runtime data (database, models, evidence, reports, secret key)
+data/verishield/
+.env
+.venv/

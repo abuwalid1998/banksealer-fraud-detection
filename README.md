@@ -1,3 +1,23 @@
+# VeriShield – Transaction Intelligence. Trusted Decisions.
+
+This branch adds **VeriShield**, a browser-based fraud-risk, customer-intelligence and AML case-management
+platform built on the BankSealer engine below (see [`docs/verishield/README.md`](docs/verishield/README.md)
+and the [requirements](docs/verishield/VERISHIELD_BUSINESS_REQUIREMENTS.md)).
+
+```bash
+./start.sh                      # macOS/Linux (Windows: start.bat) – or:
+pip install -r requirements-verishield.txt && python run_verishield.py
+```
+
+Open **http://localhost:8000**, sign in with `1000` / `Admin` (IT Admin – you will be asked to change the
+password). Development accounts for the other roles are listed on the sign-in page:
+`2000` AML Manager, `3001`/`3002` AML Employees, `4000` Chief AML/Compliance.
+Docker: `docker compose up --build` (or `docker compose -f docker-compose.postgres.yml up --build`).
+
+![VeriShield](docs/verishield/screenshots/manager-overview.png)
+
+---
+
 # BankSealer Fraud Detection: desktop application
 
 A desktop application for online-banking fraud analysis based on the **BankSealer** framework
