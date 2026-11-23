@@ -1,26 +1,43 @@
 """Small shared helpers: identifiers, tenant lookup, serialisation."""
 from __future__ import annotations
 
-import threading
 from datetime import datetime
 from typing import Any
 
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 
-from ..models import Counter, Tenant
+from ..models import Tenant
 
-_seq_lock = threading.Lock()
+_UPSERT = text("INSERT INTO counters (tenant_id, name, value) VALUES (:t, :n, 1) "
+               "ON CONFLICT (tenant_id, name) DO UPDATE SET value = counters.value + 1 RETURNING value")
+
+
+_counter_engines: dict = {}
+
+
+def _counter_engine(bind):
+    """Separate small pool for sequence increments so they can never wait on the main pool."""
+    key = str(bind.url)
+    eng = _counter_engines.get(key)
+    if eng is None:
+        from sqlalchemy import create_engine
+        eng = _counter_engines[key] = create_engine(bind.url, pool_size=4, max_overflow=16, pool_pre_ping=True)
+    return eng
 
 
 def next_seq(db: Session, tenant_id: str, name: str) -> int:
-    with _seq_lock:
-        row = db.get(Counter, (tenant_id, name))
-        if row is None:
-            row = Counter(tenant_id=tenant_id, name=name, value=0)
-            db.add(row)
-        row.value += 1
-        db.flush()
-        return row.value
+    """Atomic per-tenant sequence.
+
+    PostgreSQL: incremented in its own short transaction, so concurrent requests never hold the
+    counter row for the duration of a decision (no lock convoy / deadlock). SQLite: a single atomic
+    statement inside the caller's transaction (SQLite serialises writers anyway).
+    """
+    bind = db.get_bind()
+    if bind.dialect.name == "postgresql":
+        with _counter_engine(bind).begin() as conn:
+            return int(conn.execute(_UPSERT, {"t": tenant_id, "n": name}).scalar())
+    return int(db.execute(_UPSERT, {"t": tenant_id, "n": name}).scalar())
 
 
 def make_ref(db: Session, tenant_id: str, name: str, prefix: str, width: int = 6) -> str:

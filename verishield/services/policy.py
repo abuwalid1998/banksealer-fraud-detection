@@ -53,7 +53,9 @@ DEFAULT_POLICY: dict[str, Any] = {
         "structuring_band": 0.15,
         "structuring_count": 3,
         "velocity_count": 8,
+        "velocity_expected_multiplier": 4.0,
         "turnover_multiplier": 2.5,
+        "turnover_min_excess": 3000,
         "shared_counterparty_customers": 3,
         "shared_counterparty_days": 7,
         "high_risk_customer_amount": 5000,
@@ -146,7 +148,30 @@ def validate_document(doc: dict) -> list[str]:
 
 
 # --------------------------------------------------------------------------- persistence
+_policy_cache: dict = {}
+POLICY_CACHE_SECONDS = 2.0
+
+
+def invalidate_policy_cache(tenant_id: str | None = None) -> None:
+    if tenant_id is None:
+        _policy_cache.clear()
+    else:
+        _policy_cache.pop(tenant_id, None)
+
+
 def active_policy(db: Session, tenant_id: str) -> PolicyVersion:
+    """Active policy version (cached for a couple of seconds on the hot decision path)."""
+    import time as _t
+    hit = _policy_cache.get(tenant_id)
+    if hit and _t.monotonic() - hit[0] < POLICY_CACHE_SECONDS:
+        return hit[1]
+    pv = _active_policy(db, tenant_id)
+    db.expunge(pv) if pv in db else None
+    _policy_cache[tenant_id] = (_t.monotonic(), pv)
+    return pv
+
+
+def _active_policy(db: Session, tenant_id: str) -> PolicyVersion:
     now = utcnow()
     rows = db.execute(select(PolicyVersion).where(PolicyVersion.tenant_id == tenant_id,
                                                    PolicyVersion.status == "ACTIVE")

@@ -60,6 +60,7 @@ def main(argv: list[str] | None = None) -> int:
     k.add_argument("--scopes", default="decisions:write,events:write,execution:write")
     k.add_argument("--tenant")
     k.add_argument("--space", default="LIVE", choices=["LIVE", "DEMO"])
+    k.add_argument("--rate-limit", type=int, default=600, help="requests per minute (default 600)")
     v = sub.add_parser("verify-audit", help="verify the tamper-evident audit chain")
     v.add_argument("--tenant")
     args = parser.parse_args(argv)
@@ -116,7 +117,8 @@ def main(argv: list[str] | None = None) -> int:
         key, prefix, hashed = new_api_key()
         with session_scope() as db:
             db.add(ApiClient(tenant_id=(args.tenant or settings.tenant_code).upper(), space=args.space, name=args.name,
-                             key_prefix=prefix, key_hash=hashed, scopes=scopes, created_by="cli"))
+                             key_prefix=prefix, key_hash=hashed, scopes=scopes, created_by="cli",
+                             rate_limit_per_minute=args.rate_limit))
         print(f"API key (shown once): {key}")
         return 0
     if cmd == "verify-audit":

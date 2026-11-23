@@ -90,6 +90,8 @@ async function editor(el, id, list, setTitle) {
         <label class="f">Structuring band<span class="help">fraction below threshold</span>${num("aml.structuring_band", aml.structuring_band, "0.01", dis)}</label>
         <label class="f">Structuring count${num("aml.structuring_count", aml.structuring_count, "1", dis)}</label>
         <label class="f">Velocity count (window)${num("aml.velocity_count", aml.velocity_count, "1", dis)}</label>
+        <label class="f">Velocity vs declared activity<span class="help">× expected transactions in the window</span>${num("aml.velocity_expected_multiplier", aml.velocity_expected_multiplier, "0.5", dis)}</label>
+        <label class="f">Turnover minimum excess<span class="help">${esc(S.me.tenant.currency)} above declared</span>${num("aml.turnover_min_excess", aml.turnover_min_excess, "100", dis)}</label>
         <label class="f">Turnover multiplier<span class="help">× declared monthly turnover</span>${num("aml.turnover_multiplier", aml.turnover_multiplier, "0.1", dis)}</label>
         <label class="f">Shared counterparty · customers${num("aml.shared_counterparty_customers", aml.shared_counterparty_customers, "1", dis)}</label>
         <label class="f">Shared counterparty · days${num("aml.shared_counterparty_days", aml.shared_counterparty_days, "1", dis)}</label>

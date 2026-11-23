@@ -24,6 +24,9 @@ def init_engine(url: str) -> Engine:
     kwargs: dict = {"future": True, "pool_pre_ping": True}
     if url.startswith("sqlite"):
         kwargs["connect_args"] = {"check_same_thread": False, "timeout": 30}
+    else:
+        import os
+        kwargs.update(pool_size=int(os.environ.get("VERISHIELD_DB_POOL", "20")), max_overflow=20, pool_timeout=10)
     _engine = create_engine(url, **kwargs)
     if url.startswith("sqlite"):
         @event.listens_for(_engine, "connect")
@@ -61,6 +64,9 @@ def create_schema() -> None:
                     continue
                 ddl_type = column.type.compile(dialect=engine.dialect)
                 conn.execute(text(f'ALTER TABLE {table.name} ADD COLUMN "{column.name}" {ddl_type}'))
+    for table in Base.metadata.sorted_tables:          # indexes added in later versions
+        for index in table.indexes:
+            index.create(engine, checkfirst=True)
 
 
 def get_db() -> Iterator[Session]:
