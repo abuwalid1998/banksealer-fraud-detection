@@ -1,7 +1,7 @@
 // Integrations & channels: connector registry, test, mapping preview, secrets, lifecycle, dead letters.
 import { api } from "../api.js";
-import { S, busy, card, chip, confirmDialog, drawer, errToast, esc, fmtDate, fmtNum, fmtRel, kpi, kv, label, loading,
-  modal, options, table, toast } from "../ui.js";
+import { S, busy, card, chip, confirmDialog, drawer, errToast, esc, fmtDate, fmtNum, fmtRel, kpi, kv, label, live,
+  liveBadge, loading, modal, options, table, toast } from "../ui.js";
 
 const can = (p) => S.me.permissions.includes(p);
 let TYPES = {};
@@ -14,6 +14,7 @@ export async function render(el) {
     el.querySelectorAll("[data-t]").forEach((b) => (b.onclick = () => { tab = b.dataset.t; draw(); }));
     const box = el.querySelector("#tab");
     (tab === "connectors" ? connectors(box) : tab === "dlq" ? deadLetters(box) : push(box)).catch(errToast);
+    if (tab === "connectors") live(box, 5000, () => connectors(box));
   };
   draw();
 }
@@ -38,8 +39,9 @@ async function connectors(box) {
       { label: "Last test", render: (c) => c.last_test_at ? `${c.last_test_ok ? chip("OK", "ok") : chip("FAILED", "crit")} <span class="tiny muted">${fmtRel(c.last_test_at)}</span>` : '<span class="muted">never</span>' },
       { label: "Last event", render: (c) => c.last_event_at ? fmtRel(c.last_event_at) : "–" },
       { label: "Credential", render: (c) => c.credential_expiry_warning ? chip(`EXPIRES ${c.credential_expires_in_days}D`, "warn") : c.secret_configured ? chip(c.secret_ref_kind, "ok") : '<span class="muted">none</span>' },
-    ], rows, { onRow: true, empty: "No connectors yet." }), { flush: true, actions: d.can_manage ? '<button class="btn primary" id="add">Add connector</button>' : "" })}</div>
-    <div class="notice" style="margin-top:16px">Secrets are stored in the encrypted vault or referenced from environment variables (<span class="code">env:NAME</span>) – never in connector configuration. Database connectors are read-only. ${S.me.tenant.demo_mode ? "In Demo Mode only demo connectors (e.g. the synthetic stream) can be enabled." : ""}</div>`;
+    ], rows, { onRow: true, empty: "No connectors yet." }), { flush: true, sub: liveBadge("LIVE COUNTERS"), actions: d.can_manage ? '<button class="btn primary" id="add">Add connector</button>' : "" })}</div>
+    <div class="notice" style="margin-top:16px">Secrets are stored in the encrypted vault or referenced from environment variables (<span class="code">env:NAME</span>) – never in connector configuration. Database connectors are read-only. Every record a channel receives is scored in real time${S.me.tenant.demo_mode ? " – in Demo Mode too: live channels feed the Demo workspace, and only outbound payment actions are simulated" : ""}.</div>
+    ${S.me.tenant.demo_mode ? `<div class="notice" style="margin-top:12px"><b>Send live data now:</b> append rows to the CSV drop file, POST JSON to the HTTP listener, or stream JSON lines to the TCP feed (see each channel's settings), e.g. <span class="code">python mock_channel/generate_transactions.py --verishield --output tcp --port 9009</span></div>` : ""}`;
   box.querySelectorAll("tr[data-row]").forEach((tr) => tr.addEventListener("click", () => openConnector(rows[+tr.dataset.row].id, () => connectors(box))));
   const add = box.querySelector("#add");
   if (add) add.onclick = () => editConnector(null, () => connectors(box));

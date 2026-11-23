@@ -261,3 +261,19 @@ export function hourBars(hours) {
   const bars = hours.map((v, h) => `<rect x="${h * bw + 2}" y="${H - 16 - ((H - 22) * v) / max}" width="${bw - 4}" height="${((H - 22) * v) / max}" rx="2" fill="#3569C8"><title>${h}:00 · ${v}</title></rect>${h % 3 === 0 ? `<text x="${h * bw + bw / 2}" y="${H - 3}" text-anchor="middle">${h}</text>` : ""}`).join("");
   return `<div class="chart"><svg viewBox="0 0 ${W} ${H}">${bars}</svg></div>`;
 }
+
+// ---------- live refresh ----------
+// Runs fn every ms while el is on screen; pauses while the tab is hidden or an overlay is open.
+export function live(el, ms, fn) {
+  let busyRun = false;
+  const id = setInterval(async () => {
+    if (!el.isConnected) return clearInterval(id);
+    if (document.hidden || busyRun || document.querySelector(".overlay, .drawer-wrap, .menu")) return;
+    busyRun = true;
+    try { await fn(); } catch { /* next tick */ } finally { busyRun = false; }
+  }, ms);
+  return () => clearInterval(id);
+}
+export function liveBadge(text = "LIVE") {
+  return `<span class="livepill"><i></i>${esc(text)}</span>`;
+}

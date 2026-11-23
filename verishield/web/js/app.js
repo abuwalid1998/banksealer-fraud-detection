@@ -1,6 +1,6 @@
 // VeriShield single-page app: sign-in, first-login setup, layout and hash router.
 import { api } from "./api.js";
-import { $, $$, LOGO, S, busy, errToast, esc, formData, icon, modal, toast } from "./ui.js";
+import { $, $$, LOGO, S, busy, errToast, esc, fmtRel, formData, icon, live, modal, toast } from "./ui.js";
 
 const PAGES = {
   overview: () => import("./pages/overview.js"),
@@ -66,7 +66,7 @@ function authLayout(inner) {
       <p class="tag">Transaction Intelligence. Trusted Decisions.</p>
       <div class="pillars"><div><b>DETECT</b>Behavioural signals across each transaction.</div><div><b>UNDERSTAND</b>Customer patterns from day one.</div>
         <div><b>INVESTIGATE</b>Assigned AML cases with evidence and decisions.</div><div><b>CONTROL</b>Configurable pass, review, hold and block outcomes.</div></div>
-      <p class="small" style="color:#7F93B0;margin-top:22px">${esc(S.info && S.info.name ? S.info.name : "")}${S.info && S.info.demo_mode ? " · Demo Mode active (synthetic data)" : ""}</p>
+      <p class="small" style="color:#7F93B0;margin-top:22px">${esc(S.info && S.info.name ? S.info.name : "")}${S.info && S.info.demo_mode ? " · Demo Mode active (live scoring, simulated payment actions)" : ""}</p>
     </div>
     <div class="panel"><div class="form">${inner}</div></div></div>`;
 }
@@ -190,16 +190,26 @@ function renderShell() {
       <div class="foot">${esc(m.tenant.name)}<br>${esc(m.user.role_label)}${m.tenant.demo_mode ? '<br><b style="color:#E8A33A">Demo workspace</b>' : ""}</div>
     </aside>
     <div class="main">
-      ${m.tenant.demo_mode ? '<div class="demo-banner" role="status">DEMO MODE – SYNTHETIC DATA</div>' : ""}
+      ${m.tenant.demo_mode ? '<div class="demo-banner" role="status">DEMO MODE – LIVE SCORING · PAYMENT ACTIONS ARE SIMULATED</div>' : ""}
       <header class="topbar">
         <button class="btn ghost menu-toggle" id="menu-toggle" aria-label="Menu">${icon("menu")}</button>
         <div class="title"><div class="crumb" id="crumb">${esc(m.tenant.name)}</div><h1 id="page-title">Overview</h1></div>
+        <div class="pulse" id="pulse" title="Real-time scoring activity in this workspace"></div>
         <form class="search" id="gsearch" role="search">${icon("search")}<input class="input" name="q" placeholder="Search transaction, customer or case…" aria-label="Global search"></form>
         <div class="usermenu"><button id="um" aria-haspopup="true"><span class="avatar">${esc(initials.toUpperCase())}</span><span class="who"><b>${esc(m.user.name)}</b><span>${esc(m.user.role_label)} · ${esc(m.user.username)}</span></span></button></div>
       </header>
       <main class="content" id="content"></main>
     </div></div>`;
   $("#menu-toggle").onclick = () => $("#sidebar").classList.toggle("open");
+  const pulse = async () => {
+    const p = await api.get("/live/pulse");
+    const on = p.channels_running > 0 || p.decisions_last_minute > 0;
+    $("#pulse").innerHTML = `<span class="livepill ${on ? "" : "off"}"><i></i>${on ? "LIVE" : "IDLE"}</span>
+      <span><b>${p.decisions_last_minute}</b> scored / min · <b>${p.channels_running}</b> channel${p.channels_running === 1 ? "" : "s"} running</span>
+      ${p.last_decision ? `<span>last ${esc(p.last_decision.decision)} ${Number(p.last_decision.fraud_score).toFixed(2)} · ${esc(fmtRel(p.last_decision.at))}</span>` : ""}`;
+  };
+  pulse().catch(() => {});
+  live(document.getElementById("pulse"), 5000, pulse);
   $("#um").onclick = (e) => {
     e.stopPropagation();
     const old = $(".menu"); if (old) return old.remove();

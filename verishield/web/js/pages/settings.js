@@ -187,7 +187,7 @@ async function demo(box) {
   const d = await api.get("/demo");
   box.innerHTML = `<div class="grid g2">
     ${card("Demo Mode", `${kv([["Status", d.demo_mode ? chip("ENABLED", "warn") : chip("DISABLED", "neutral")], ["Synthetic dataset", d.has_demo_data ? "present" : "not generated"]])}
-      <p class="small" style="margin-top:12px">Demo Mode switches every user's workspace to an isolated synthetic namespace: separate customers, transactions, models, connectors, API keys and reports. A persistent banner and report watermark are shown; payment execution is simulated and production connectors cannot be activated.</p>
+      <p class="small" style="margin-top:12px">Demo Mode switches every user's workspace to a separate Demo namespace (its own customers, transactions, models, channels, API keys and reports). Live data channels work in Demo Mode and every record is scored in real time; only outbound payment actions (release / reject sent to the bank) are simulated. A persistent banner and report watermark are shown.</p>
       <div class="row" style="margin-top:12px"><button class="btn ${d.demo_mode ? "" : "primary"}" id="toggle">${d.demo_mode ? "Switch to live workspace" : "Enable Demo Mode"}</button></div>`)}
     ${card("Reset synthetic data", `<p class="small">Deletes every Demo-space record and artifact (customers, transactions, decisions, alerts, cases, evidence, models, demo connectors, demo API keys, demo reports) and regenerates a fresh dataset. <b>Live data is never touched.</b> The reset is audited.</p>
       <label class="f" style="margin-top:10px">Type RESET to confirm<input class="input mono" id="confirm"></label>

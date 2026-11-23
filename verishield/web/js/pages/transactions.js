@@ -2,7 +2,7 @@
 import { api } from "../api.js";
 import { navigate } from "../app.js";
 import { S, bindTable, busy, card, chip, codes, decisionChip, drawer, errToast, esc, fmtDate, fmtMoney, fmtScore,
-  kv, label, loading, modal, options, pager, scoreBar, table, toast } from "../ui.js";
+  kv, label, live, loading, modal, options, pager, scoreBar, table, toast } from "../ui.js";
 
 const can = (p) => S.me.permissions.includes(p);
 
@@ -17,14 +17,18 @@ export async function render(el, { params }) {
       <select class="input" name="tx_type">${options(["bank_transfer", "phone_recharge", "prepaid_card"], "", { blank: "All products" })}</select>
       <select class="input" name="execution_state">${options(["PENDING", "HELD", "AUTHORISED", "DECLINED", "SETTLED", "EXPIRED", "RELEASE_REQUESTED", "DECLINE_REQUESTED", "RECALLED"], f.execution_state, { blank: "All execution states" })}</select>
       <input class="input" type="date" name="date_from" title="From"><input class="input" type="date" name="date_to" title="To">
+      <label class="check"><input type="checkbox" id="livechk" checked> <span class="livepill" id="livebadge"><i></i>LIVE</span></label>
     </div>`, { sub: can("tx.view_masked") && !can("tx.view_full") ? "Technical view – customer identifiers and amounts are masked" :
       can("tx.view_assigned") ? "Only transactions linked to your assigned cases" : "" })}
     <div class="card" style="margin-top:16px" id="list">${loading()}</div>`;
-  const load = async () => {
+  let seen = null;
+  const load = async (silent = false) => {
     const q = new URLSearchParams(Object.entries(f).filter(([, v]) => v !== "" && v !== null)).toString();
     const box = el.querySelector("#list");
     try {
       const d = await api.get(`/transactions?${q}&page_size=50`);
+      const fresh = new Set(silent && seen ? d.items.filter((r) => !seen.has(r.tx_ref)).map((r) => r.tx_ref) : []);
+      seen = new Set(d.items.map((r) => r.tx_ref));
       box.innerHTML = table([
         { label: "Time", render: (r) => `<span class="nowrap">${fmtDate(r.ts)}</span>` },
         { label: "Transaction", render: (r) => `<span class="mono">${esc(r.tx_ref)}</span>` },
@@ -38,6 +42,7 @@ export async function render(el, { params }) {
         { label: "AML", render: (r) => r.aml_signal_level && r.aml_signal_level !== "NONE" ? chip(r.aml_signal_level) : '<span class="muted">–</span>' },
         { label: "Execution", render: (r) => chip(r.execution_state) },
       ], d.items, { onRow: true }) + pager(d.total, f.page, 50);
+      box.querySelectorAll("tr[data-row]").forEach((tr) => { if (fresh.has(d.items[+tr.dataset.row].tx_ref)) tr.classList.add("new"); });
       bindTable(box, d.items, (r) => openTransaction(r.tx_ref, load));
       box.querySelectorAll("[data-page]").forEach((b) => (b.onclick = () => { f.page = +b.dataset.page; load(); }));
     } catch (e) { errToast(e); }
@@ -47,6 +52,9 @@ export async function render(el, { params }) {
     f[inp.name] = inp.value; f.page = 1; clearTimeout(t); t = setTimeout(load, 250);
   }));
   await load();
+  const liveChk = el.querySelector("#livechk");
+  liveChk.onchange = () => el.querySelector("#livebadge").classList.toggle("off", !liveChk.checked);
+  live(el, 4000, async () => { if (liveChk.checked && f.page === 1) await load(true); });
   if (params.open) openTransaction(params.open, load);
 }
 

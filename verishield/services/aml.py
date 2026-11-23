@@ -62,7 +62,7 @@ class TxContext:
         others = self.db.execute(select(func.count(func.distinct(Transaction.customer_ref))).where(
             Transaction.tenant_id == self.tenant_id, Transaction.space == self.space,
             Transaction.beneficiary == ben, Transaction.customer_ref != self.tx.user_id,
-            Transaction.ts >= since)).scalar() or 0
+            Transaction.ts >= since, Transaction.ts <= self.tx.timestamp)).scalar() or 0
         return int(others) + 1
 
 

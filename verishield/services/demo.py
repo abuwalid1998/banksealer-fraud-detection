@@ -168,11 +168,60 @@ def seed(db: Session, tenant_id: str, actor: str = "system", with_cases: bool = 
     _backdate(db, tenant.id)
     if with_cases:
         _sample_cases(db, tenant)
+    channels = create_live_channels(db, tenant.id, actor) if settings.demo_live_channels else []
     audit.record(db, tenant.id, "demo.seed", actor=actor, resource_type="demo", space="DEMO",
                  after={"customers": len(gen.customers) + 8, "history": len(history), "scored": n_live,
-                        "fraud_model": model.id, "segmentation": seg.id, "seconds": round(time.time() - started, 1)})
+                        "fraud_model": model.id, "segmentation": seg.id, "live_channels": channels,
+                        "seconds": round(time.time() - started, 1)})
+    if settings.background_jobs:
+        from .connectors import start_enabled
+        start_enabled(db)
     return {"customers": len(gen.customers) + 8, "history": len(history), "scored": n_live, "model": model.id,
-            "segmentation": seg.id}
+            "segmentation": seg.id, "live_channels": channels}
+
+
+INCOMING_COLUMNS = ["transaction_id", "customer_id", "timestamp", "transaction_type", "amount", "currency", "channel",
+                    "beneficiary_reference", "beneficiary_country", "ip_address", "ip_country", "asn"]
+
+
+def incoming_file() -> str:
+    folder = settings.data_dir / "incoming"
+    folder.mkdir(parents=True, exist_ok=True)
+    path = folder / "transactions.csv"
+    if not path.exists():
+        path.write_text(",".join(INCOMING_COLUMNS) + "\n", encoding="utf-8")
+    return str(path)
+
+
+def create_live_channels(db: Session, tenant_id: str, actor: str = "system") -> list[dict]:
+    """Ready-to-use live channels for the Demo workspace; every record they receive is scored in real time."""
+    from .connectors import add_log, test_connection
+
+    bind = "0.0.0.0" if settings.host == "0.0.0.0" else "127.0.0.1"
+    specs = [
+        ("Live payment stream (synthetic payment switch)", "demo_stream", "PRE_AUTH",
+         {"rate": settings.demo_stream_rate, "fraud_ratio": 0.04, "poll_seconds": 2}),
+        ("TCP JSON-lines feed", "tcp_json", "POST_EVENT", {"host": bind, "port": settings.demo_tcp_port}),
+        ("HTTP webhook listener", "http_listener", "POST_EVENT",
+         {"host": bind, "port": settings.demo_http_port, "path": "/transactions"}),
+        ("CSV drop file", "file_drop", "POST_EVENT", {"path": incoming_file(), "follow": True, "poll_seconds": 1}),
+    ]
+    out = []
+    for name, ctype, mode, cfg in specs:
+        c = Connector(tenant_id=tenant_id, space="DEMO", name=name, type=ctype, direction="INBOUND", environment="DEV",
+                      ingest_mode=mode, config=cfg, auth_method="NONE" if ctype in ("demo_stream", "file_drop")
+                      else "NETWORK_ALLOWLIST", owner=actor, created_by=None,
+                      data_scope="Live channel of the Demo workspace (scored in real time)")
+        db.add(c)
+        db.flush()
+        add_log(db, c, "Created automatically for Demo Mode", actor=actor)
+        res = test_connection(db, c, actor)
+        if res["ok"]:
+            c.status = "ENABLED"
+            add_log(db, c, "Enabled automatically - data received here is scored live", actor=actor)
+        out.append({"name": name, "type": ctype, "status": c.status, "detail": res["message"]})
+    db.commit()
+    return out
 
 
 def _backdate(db: Session, tenant_id: str) -> None:

@@ -1,8 +1,8 @@
 // AML alert queue: triage, close with reason, merge into cases.
 import { api } from "../api.js";
 import { navigate } from "../app.js";
-import { S, card, chip, decisionChip, errToast, esc, fmtDate, fmtRel, fmtScore, loading, modal, options, pager,
-  table, toast } from "../ui.js";
+import { S, card, chip, decisionChip, errToast, esc, fmtDate, fmtRel, fmtScore, live, liveBadge, loading, modal,
+  options, pager, table, toast } from "../ui.js";
 import { createCaseDialog, openTransaction } from "./transactions.js";
 
 const can = (p) => S.me.permissions.includes(p);
@@ -17,7 +17,7 @@ export async function render(el, { params }) {
       <select class="input" name="timing">${options([["PRE_EVENT", "Pre-event"], ["POST_EVENT", "Post-event"]], "", { blank: "Any timing" })}</select>
       <select class="input" name="decision">${options(["REVIEW", "HOLD", "DECLINE", "ERROR_POLICY", "PASS"], "", { blank: "All decisions" })}</select>
     </div>`, { actions: can("cases.create") ? '<button class="btn primary" id="mk" disabled>Create case from selected</button>' : "",
-      sub: "An alert is a signal for review – not a confirmed crime." })}
+      sub: `${liveBadge()} An alert is a signal for review – not a confirmed crime.` })}
     <div class="card" style="margin-top:16px" id="list">${loading()}</div>`;
   const mk = el.querySelector("#mk");
   const load = async () => {
@@ -69,4 +69,5 @@ export async function render(el, { params }) {
     f[inp.name] = inp.value; f.page = 1; clearTimeout(t); t = setTimeout(load, 250);
   }));
   load();
+  live(el, 8000, async () => { if (!selected.size && f.page === 1) await load(); });
 }

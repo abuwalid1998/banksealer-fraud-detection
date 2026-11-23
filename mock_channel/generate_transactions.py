@@ -29,6 +29,8 @@ import os
 import socket
 import sqlite3
 import sys
+import uuid
+from datetime import datetime, timezone
 import time
 import urllib.request
 from typing import Iterable, Iterator
@@ -183,10 +185,23 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--live", action="store_true", help="keep streaming after the history")
     p.add_argument("--rate", type=float, default=5.0, help="live transactions per second (0 = no pause)")
     p.add_argument("--count", type=int, default=0, help="stop the live stream after N records (0 = never)")
+    p.add_argument("--currency", default="EUR")
+    p.add_argument("--now", action="store_true", help="stamp live records with the current time")
+    p.add_argument("--verishield", action="store_true",
+                   help="feed a VeriShield Demo workspace: same customers as the demo (BOP, PS, ILS, seed 2026, "
+                        "180 customers), live stream only, current timestamps, unique ids")
     args = p.parse_args(argv)
 
+    if args.verishield:
+        args.banks, args.currency, args.seed, args.days, args.live, args.now = "BOP:PS", "ILS", 2026, 0, True, True
+        if args.customers == 150:
+            args.customers = 180
+        if args.rate == 5.0:
+            args.rate = 1.0
     banks = dict(item.split(":") for item in args.banks.split(",") if item)
-    gen = TransactionGenerator(args.customers, banks=banks, seed=args.seed, fraud_ratio=args.fraud_ratio)
+    gen = TransactionGenerator(args.customers, banks=banks, seed=args.seed, fraud_ratio=args.fraud_ratio,
+                               currency=args.currency)
+    run_id = uuid.uuid4().hex[:6].upper()
     sink = make_sink(args)
     written = frauds = 0
     try:
@@ -202,6 +217,9 @@ def main(argv: list[str] | None = None) -> int:
             live = 0
             print(f"live stream: {args.rate:g} tx/s to {args.output} (Ctrl+C to stop)", file=sys.stderr)
             for record in paced(gen.live(), args.rate):
+                if args.now:
+                    record["timestamp"] = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+                    record["tx_id"] = f"FEED-{run_id}-{live + 1:07d}"
                 sink.write(record)
                 live += 1
                 frauds += record["is_fraud"]

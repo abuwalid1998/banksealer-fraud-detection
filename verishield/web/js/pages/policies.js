@@ -143,7 +143,8 @@ async function editor(el, id, list, setTitle) {
       <div>${stackedBars([{ day: ".....Current", ...r.current }, { day: ".....Proposed", ...r.proposed }], OUT, { height: 150 })}</div>
       <div>${table([{ label: "Outcome", render: (x) => chip(x.o) }, { label: "Current", num: true, render: (x) => fmtNum(x.cur) }, { label: "Proposed", num: true, render: (x) => fmtNum(x.prop) },
         { label: "Change", num: true, render: (x) => `<b style="color:${x.delta > 0 ? "var(--red)" : x.delta < 0 ? "var(--ok)" : "inherit"}">${x.delta > 0 ? "+" : ""}${x.delta}</b>` }], rows)}</div></div>
-      <p class="tiny muted" style="margin:10px 0">${esc(r.note)}</p>
+      <p class="small" style="margin:10px 0">Recomputed live: AML signal changed for <b>${fmtNum(r.aml_signal_changes)}</b> decisions, business-rule hits changed for <b>${fmtNum(r.rule_hit_changes)}</b>.</p>
+      <p class="tiny muted" style="margin:0 0 10px">${esc(r.note)}</p>
       ${r.changed_examples.length ? table([{ label: "Transaction", render: (x) => `<a href="#/transactions?open=${encodeURIComponent(x.tx_ref)}" class="mono small">${esc(x.tx_ref)}</a>` }, { label: "Customer", key: "customer_ref" },
         { label: "Amount", num: true, render: (x) => fmtNum(x.amount, 2) }, { label: "Score", num: true, render: (x) => Number(x.fraud_score).toFixed(2) },
         { label: "Current", render: (x) => chip(x.current) }, { label: "Proposed", render: (x) => chip(x.proposed) }], r.changed_examples) : '<p class="small muted">No individual decisions would change.</p>'}`);

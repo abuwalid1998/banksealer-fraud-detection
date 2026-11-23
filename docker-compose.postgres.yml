@@ -17,7 +17,7 @@ services:
   verishield:
     build: .
     image: verishield:latest
-    ports: ["8000:8000"]
+    ports: ["8000:8000", "9009:9009", "9010:9010"]   # web/API, Demo TCP feed, Demo HTTP listener
     environment:
       VERISHIELD_ENV: ${VERISHIELD_ENV:-development}
       VERISHIELD_SECRET_KEY: ${VERISHIELD_SECRET_KEY:-}
