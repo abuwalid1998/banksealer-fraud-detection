@@ -256,16 +256,65 @@ def segments(p: Principal = Depends(require("models.view", "customers.view_full"
             "low_confidence_assignments": low_conf}
 
 
+@router.get("/models/clusters", tags=["models"])
+def model_clusters(p: Principal = Depends(require("models.clusters", "models.view")), db: Session = Depends(get_db)):
+    from ..services import model_ops
+    return model_ops.clusters(db, p.tenant_id, p.space, show_names=p.can("customers.view_full"))
+
+
+@router.get("/models/health", tags=["models"])
+def model_health(p: Principal = Depends(require("models.view", "models.train")), db: Session = Depends(get_db)):
+    from ..services import model_ops
+    return model_ops.health(db, p.tenant_id, p.space)
+
+
+@router.get("/models/params", tags=["models"])
+def model_params(p: Principal = Depends(require("models.view", "models.train")), db: Session = Depends(get_db)):
+    from ..services import model_ops
+    t = db.get(Tenant, p.tenant_id)
+    out = model_ops.describe(t, p.space)
+    out["editable"] = p.can("models.train")
+    return out
+
+
+@router.put("/models/params", tags=["models"])
+def update_model_params(body: dict, p: Principal = Depends(require_user("models.train")), db: Session = Depends(get_db)):
+    from ..services import model_ops
+    t = db.get(Tenant, p.tenant_id)
+    before = model_ops.overrides(t, p.space)
+    try:
+        new = {} if body.get("reset") else model_ops.validate(body.get("values") or {})
+    except (TypeError, ValueError) as exc:
+        raise _bad(422, str(exc)) from exc
+    model_ops.save(db, t, p.space, new)
+    audit.record(db, p.tenant_id, "model.parameters_update", actor=p, resource_type="model", space=p.space,
+                 before=before, after=new)
+    out = model_ops.describe(t, p.space)
+    out["editable"] = True
+    out["note"] = "Saved. The new parameters apply to the next training run; retrain to use them."
+    return out
+
+
 @router.post("/models/fraud/train", tags=["models"])
 def train(body: dict = None, p: Principal = Depends(require_user("models.train")), db: Session = Depends(get_db)):
-    mode = (body or {}).get("mode", "activate")
+    from ..services import model_ops
+    body = body or {}
+    mode = body.get("mode", "activate")
+    params = None
+    if body.get("params"):
+        try:
+            params = {**model_ops.overrides(db.get(Tenant, p.tenant_id), p.space), **model_ops.validate(body["params"])}
+        except (TypeError, ValueError) as exc:
+            raise _bad(422, str(exc)) from exc
     try:
         mv = engine_registry.train_fraud_model(db, p.tenant_id, p.space, p.display, activate=mode == "activate",
-                                               shadow=mode == "shadow", notes=str((body or {}).get("notes", "")))
+                                               shadow=mode == "shadow", notes=str(body.get("notes", "")),
+                                               params=params, window_days=body.get("window_days") or None)
     except ValueError as exc:
         raise _bad(422, str(exc)) from exc
     audit.record(db, p.tenant_id, "model.train", actor=p, resource_type="model", resource_id=mv.id,
-                 after={"mode": mode, "training_size": mv.training_size})
+                 after={"mode": mode, "training_size": mv.training_size, "params": params,
+                        "window_days": body.get("window_days")})
     return row_dict(mv, exclude=("artifact_path",))
 
 

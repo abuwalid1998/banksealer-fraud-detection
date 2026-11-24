@@ -35,6 +35,8 @@ SCOPE_PERMISSIONS = {
     "read:aml": {"alerts.view_all", "cases.view_all", "tx.view_masked", "customers.view_masked", "policies.view"},
     "reports:generate": {"reports.system", "reports.aml"},
     "policies:simulate": {"policies.view", "policies.simulate"},
+    "read:executive": {"system.summary", "models.view", "models.clusters"},
+    "mcp:use": {"mcp.use"},
 }
 API_SCOPES = tuple(SCOPE_PERMISSIONS)
 
@@ -88,7 +90,7 @@ def tenant_mfa_required(tenant: Tenant, role: str) -> bool:
     required = bool(sec.get("mfa_required", settings.require_mfa))
     if not required:
         return False
-    roles = sec.get("mfa_roles") or ["IT_ADMIN", "AML_MANAGER", "AML_EMPLOYEE", "CHIEF_AML"]
+    roles = sec.get("mfa_roles") or ["IT_ADMIN", "AML_MANAGER", "AML_EMPLOYEE", "CHIEF_AML", "CEO"]
     return role in roles
 
 

@@ -78,7 +78,8 @@ export async function openTransaction(ref, onChange) {
       <div class="grid g2">
         ${card("Transaction", kv([["Customer", masked ? esc(t.customer_ref) : `<a href="#/customers/${encodeURIComponent(t.customer_ref)}">${esc(t.customer_ref)}</a>`],
           ["Time", fmtDate(t.ts, { seconds: true })], ["Product", esc(label(t.tx_type))], ["Amount", fmtMoney(t.amount, t.currency)],
-          ["Channel", esc(label(t.channel))], ["Source", esc(t.source)], ["Beneficiary", `<span class="mono">${esc(t.beneficiary)}</span>`],
+          ["Channel", esc(label(t.channel))], ["Source", esc(t.source)], ["Beneficiary", `<span class="mono">${esc(t.beneficiary)}</span>${t.beneficiary_name ? `<div class="small">${esc(t.beneficiary_name)}</div>` : ""}`],
+          t.purpose ? ["Purpose", esc(t.purpose)] : null, t.city ? ["City", esc(t.city)] : null, t.device ? ["Device", esc(t.device)] : null,
           ["Beneficiary country", esc(t.beneficiary_country)], ["Connection", esc(t.connection)], ["IP", esc(t.ip)],
           t.scenario ? ["Synthetic scenario", chip(t.scenario, "neutral")] : null]))}
         ${dec ? card("Decision", `<div class="scorebars">${scoreBar(dec.local_score, "Local (customer)")}${scoreBar(dec.temporal_score, "Temporal (24h window)")}${scoreBar(dec.global_score, "Global (peer group)")}${scoreBar(dec.fraud_score, "Combined fraud score")}</div>

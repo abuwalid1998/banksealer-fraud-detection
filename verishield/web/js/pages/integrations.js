@@ -1,6 +1,6 @@
 // Integrations & channels: connector registry, test, mapping preview, secrets, lifecycle, dead letters.
 import { api } from "../api.js";
-import { S, busy, card, chip, confirmDialog, drawer, errToast, esc, fmtDate, fmtNum, fmtRel, kpi, kv, label, live,
+import { S, busy, card, chip, confirmDialog, drawer, empty, errToast, esc, fmtDate, fmtNum, fmtRel, icon, kpi, kv, label, live,
   liveBadge, loading, modal, options, table, toast } from "../ui.js";
 
 const can = (p) => S.me.permissions.includes(p);
@@ -10,26 +10,60 @@ export async function render(el) {
   TYPES = (await api.get("/connectors/types")).types;
   let tab = "connectors";
   const draw = () => {
-    el.innerHTML = `<div class="tabs"><button data-t="connectors" class="${tab === "connectors" ? "on" : ""}">Connectors</button><button data-t="dlq" class="${tab === "dlq" ? "on" : ""}">Dead-letter queue</button><button data-t="push" class="${tab === "push" ? "on" : ""}">Push API</button></div><div id="tab">${loading()}</div>`;
+    const dbTab = can("tenant.manage") || can("connectors.manage");
+    el.innerHTML = `<div class="tabs"><button data-t="connectors" class="${tab === "connectors" ? "on" : ""}">Channels &amp; connectors</button>${dbTab ? `<button data-t="db" class="${tab === "db" ? "on" : ""}">Fraud engine database</button>` : ""}<button data-t="dlq" class="${tab === "dlq" ? "on" : ""}">Dead-letter queue</button><button data-t="push" class="${tab === "push" ? "on" : ""}">Push API</button></div><div id="tab">${loading()}</div>`;
     el.querySelectorAll("[data-t]").forEach((b) => (b.onclick = () => { tab = b.dataset.t; draw(); }));
     const box = el.querySelector("#tab");
-    (tab === "connectors" ? connectors(box) : tab === "dlq" ? deadLetters(box) : push(box)).catch(errToast);
+    (tab === "connectors" ? connectors(box) : tab === "db" ? database(box) : tab === "dlq" ? deadLetters(box) : push(box)).catch(errToast);
     if (tab === "connectors") live(box, 5000, () => connectors(box));
   };
   draw();
 }
 
+const TYPE_ICON = { demo_stream: "transactions", tcp_json: "integrations", http_listener: "integrations", file_drop: "reports",
+  db_results: "database", db_replica: "database", rest_pull: "refresh", rest_webhook: "integrations", outbound_webhook: "play" };
+const RUNNABLE = new Set(["demo_stream", "tcp_json", "http_listener", "file_drop", "db_replica", "rest_pull", "db_results"]);
+
+function channelCard(c, manage) {
+  const runnable = RUNNABLE.has(c.type) && c.runtime_supported;
+  const on = c.status === "ENABLED" || c.status === "DEGRADED";
+  const cfg = c.config || {};
+  const where = c.type === "tcp_json" || c.type === "http_listener" ? `${cfg.host}:${cfg.port}${cfg.path || ""}` : c.type === "file_drop" ? cfg.path
+    : c.type === "db_results" ? `${cfg.url} › ${cfg.table || "fraud_results"}` : c.type === "demo_stream" ? `catch-up ${cfg.speed || 60}× then real time · fraud ratio ${cfg.fraud_ratio ?? 0.03}` : (cfg.url || "");
+  const isOut = c.direction === "OUTBOUND";
+  return `<div class="channel-card ${c.running ? "running" : ""}" data-open="${esc(c.id)}">
+    <div class="top"><div class="ic">${icon(TYPE_ICON[c.type] || "integrations")}</div>
+      <div style="min-width:0;flex:1"><b>${esc(c.name)}</b><div class="tiny muted">${esc(c.type_label)}</div></div>
+      ${c.running ? liveBadge(isOut ? "WRITING" : "STREAMING") : chip(c.status)}</div>
+    <div class="tiny mono muted" style="word-break:break-all">${esc(where || "")}</div>
+    <div class="stats"><span><b>${fmtNum(c.counters.received || 0)}</b>${isOut ? "written" : "received"}</span>${isOut ? "" : `<span><b>${fmtNum(c.counters.accepted || 0)}</b>scored</span><span><b>${fmtNum(c.counters.rejected || 0)}</b>rejected</span>`}
+      <span><b>${c.last_event_at ? esc(fmtRel(c.last_event_at)) : "–"}</b>last ${isOut ? "write" : "event"}</span></div>
+    ${c.last_error && c.status === "DEGRADED" ? `<div class="notice crit tiny">${esc(c.last_error)}</div>` : ""}
+    ${manage && runnable ? `<div class="row">${on
+      ? `<button class="btn danger sm" data-stop="${esc(c.id)}">${icon("stop")} ${isOut ? "Stop writing" : "Stop streaming"}</button>`
+      : `<button class="btn teal sm" data-start="${esc(c.id)}" ${c.last_test_ok ? "" : "disabled title='Test the connection first'"}>${icon("play")} ${isOut ? "Start writing results" : "Start streaming"}</button>`}
+      <button class="btn sm" data-test="${esc(c.id)}">Test</button></div>` : ""}
+  </div>`;
+}
+
 async function connectors(box) {
   const d = await api.get("/connectors");
   const rows = d.connectors;
-  box.innerHTML = `<div class="kpis">
-      ${kpi("Connectors", fmtNum(rows.length), `${S.me.tenant.demo_mode ? "Demo" : "Live"} workspace`, "accent")}
+  const manage = d.can_manage;
+  const runningIn = rows.filter((c) => c.running && c.direction !== "OUTBOUND").length;
+  const channels = rows.filter((c) => RUNNABLE.has(c.type) && c.status !== "RETIRED");
+  box.innerHTML = `${!runningIn && manage ? `<div class="hero" style="margin-bottom:16px"><div style="flex:1;min-width:260px;position:relative;z-index:1">
+      <h2>No channel is streaming</h2><p>Start a channel to receive transactions from the payment gateway. Each transaction is scored by the fraud engine as it arrives, and the result is stored and written to the results database.${S.me.tenant.demo_mode ? " In Demo Mode the gateway simulator produces realistic customer activity; nothing is pre-loaded." : ""}</p></div>
+      ${channels.find((c) => c.type === "demo_stream" && c.last_test_ok) ? `<button class="btn teal" data-start="${esc(channels.find((c) => c.type === "demo_stream").id)}">${icon("play")} Start the payment gateway simulator</button>` : ""}</div>` : ""}
+    <div class="kpis">
+      ${kpi("Channels streaming", fmtNum(runningIn), `${S.me.tenant.demo_mode ? "Demo" : "Live"} workspace`, runningIn ? "accent" : "")}
       ${kpi("Enabled", fmtNum(rows.filter((c) => c.status === "ENABLED").length))}
       ${kpi("Degraded", fmtNum(rows.filter((c) => c.status === "DEGRADED").length), "", rows.some((c) => c.status === "DEGRADED") ? "crit" : "")}
-      ${kpi("Events received", fmtNum(rows.reduce((s, c) => s + (c.counters.received || 0), 0)))}
-      ${kpi("Rejected", fmtNum(rows.reduce((s, c) => s + (c.counters.rejected || 0), 0)))}
+      ${kpi("Events received", fmtNum(rows.filter((c) => c.direction !== "OUTBOUND").reduce((s, c) => s + (c.counters.received || 0), 0)))}
+      ${kpi("Results written", fmtNum(rows.filter((c) => c.type === "db_results").reduce((s, c) => s + (c.counters.received || 0), 0)), "to the results database")}
     </div>
-    <div style="margin-top:16px">${card("Connectors", table([
+    ${channels.length ? `<h3 style="margin:18px 0 10px">Channels ${liveBadge("LIVE COUNTERS")}</h3><div class="grid g3">${channels.map((c) => channelCard(c, manage)).join("")}</div>` : ""}
+    <div style="margin-top:16px">${card("All connectors", table([
       { label: "Connector", render: (c) => `<b>${esc(c.name)}</b><div class="tiny muted">${esc(c.type_label)}</div>` },
       { label: "Status", render: (c) => chip(c.status) + (c.running ? ' <span class="chip c-ok plain">RUNNING</span>' : "") },
       { label: "Env", render: (c) => chip(c.environment, "neutral") }, { label: "Direction", render: (c) => esc(label(c.direction)) },
@@ -39,21 +73,56 @@ async function connectors(box) {
       { label: "Last test", render: (c) => c.last_test_at ? `${c.last_test_ok ? chip("OK", "ok") : chip("FAILED", "crit")} <span class="tiny muted">${fmtRel(c.last_test_at)}</span>` : '<span class="muted">never</span>' },
       { label: "Last event", render: (c) => c.last_event_at ? fmtRel(c.last_event_at) : "–" },
       { label: "Credential", render: (c) => c.credential_expiry_warning ? chip(`EXPIRES ${c.credential_expires_in_days}D`, "warn") : c.secret_configured ? chip(c.secret_ref_kind, "ok") : '<span class="muted">none</span>' },
-    ], rows, { onRow: true, empty: "No connectors yet." }), { flush: true, sub: liveBadge("LIVE COUNTERS"), actions: d.can_manage ? '<button class="btn primary" id="add">Add connector</button>' : "" })}</div>
-    <div class="notice" style="margin-top:16px">Secrets are stored in the encrypted vault or referenced from environment variables (<span class="code">env:NAME</span>) – never in connector configuration. Database connectors are read-only. Every record a channel receives is scored in real time${S.me.tenant.demo_mode ? " – in Demo Mode too: live channels feed the Demo workspace, and only outbound payment actions are simulated" : ""}.</div>
-    ${S.me.tenant.demo_mode ? `<div class="notice" style="margin-top:12px"><b>Send live data now:</b> append rows to the CSV drop file, POST JSON to the HTTP listener, or stream JSON lines to the TCP feed (see each channel's settings), e.g. <span class="code">python mock_channel/generate_transactions.py --verishield --output tcp --port 9009</span></div>` : ""}`;
+    ], rows, { onRow: true, empty: "No connectors yet." }), { flush: true, actions: manage ? '<button class="btn primary" id="add">Add connector</button>' : "" })}</div>
+    <div class="notice" style="margin-top:16px">Channels start only when an IT Admin starts them. Secrets are stored in the encrypted vault or referenced from environment variables (<span class="code">env:NAME</span>) – never in connector configuration. Database sources are read-only; the results database receives every decision.</div>
+    ${S.me.tenant.demo_mode ? `<div class="notice" style="margin-top:12px"><b>Other ways to send data:</b> append rows to the CSV drop file, POST JSON to the HTTP listener, or stream JSON lines to the TCP feed (start the channel first), e.g. <span class="code">python mock_channel/generate_transactions.py --verishield --output tcp --port 9009</span></div>` : ""}`;
   box.querySelectorAll("tr[data-row]").forEach((tr) => tr.addEventListener("click", () => openConnector(rows[+tr.dataset.row].id, () => connectors(box))));
+  box.querySelectorAll("[data-open]").forEach((el) => el.addEventListener("click", (e) => { if (!e.target.closest("button")) openConnector(el.dataset.open, () => connectors(box)); }));
+  const act = (sel, attr, path, msg) => box.querySelectorAll(sel).forEach((b) => (b.onclick = (e) => { e.stopPropagation(); busy(b, async () => {
+    try { const r = await api.post(`/connectors/${b.dataset[attr]}/${path}`); toast(typeof msg === "function" ? msg(r) : msg); connectors(box); } catch (err) { errToast(err); } }); }));
+  act("[data-start]", "start", "enable", "Channel started – transactions are scored as they arrive");
+  act("[data-stop]", "stop", "disable", "Channel stopped");
+  act("[data-test]", "test", "test", (r) => `${r.ok ? "Connection OK" : "Test failed"}: ${r.message}`);
   const add = box.querySelector("#add");
   if (add) add.onclick = () => editConnector(null, () => connectors(box));
+}
+
+async function database(box) {
+  const d = await api.get("/system/database");
+  const p = d.primary;
+  box.innerHTML = `<div class="grid g2">
+    ${card("Fraud engine database (primary)", `${kv([["Engine", `<b>${esc(p.engine)}</b>`], ["Connection", `<span class="mono small">${esc(p.url)}</span>`],
+      ["Size", p.size_bytes ? `${fmtNum(p.size_bytes / 1048576, 1)} MB` : "–"], ["Connection pool", p.pool_size ?? "–"],
+      ["Pending change", p.pending_change ? `<span class="mono small">${esc(p.pending_change)}</span> ${chip("RESTART REQUIRED", "warn")}` : "none"]])}
+      <h3 style="margin:14px 0 6px">Stored records</h3>${kv(Object.entries(p.row_counts).map(([k, v]) => [label(k), fmtNum(v)]))}`, { sub: "customers, transactions, scores, alerts, cases and audit" })}
+    ${card("Move the engine to another database", `<p class="small">Use the bank's PostgreSQL server for production volumes. The schema is created automatically at the next start; existing records are not copied (use a database migration or start fresh).</p>
+      <label class="f" style="margin-top:10px">Database URL<input class="input mono" id="dburl" placeholder="postgresql://verishield:PASSWORD@dbserver:5432/verishield"></label>
+      <div class="row" style="margin-top:10px"><button class="btn" id="dbtest">Test connection</button><span class="spacer"></span><button class="btn primary" id="dbsave">Save (applies after restart)</button></div>
+      <div id="dbres" style="margin-top:10px"></div>`)}
+  </div>
+  <div style="margin-top:16px">${card("Results databases (decision write-back)", d.results_databases.length ? table([
+    { label: "Name", render: (c) => `<b>${esc(c.name)}</b>` }, { label: "Target", render: (c) => `<span class="mono small">${esc(c.config.url)} › ${esc(c.config.table || "fraud_results")}</span>` },
+    { label: "Status", render: (c) => chip(c.status) + (c.running ? ` ${liveBadge("WRITING")}` : "") }, { label: "Rows written", num: true, render: (c) => fmtNum(c.counters.received || 0) },
+    { label: "Last write", render: (c) => c.last_event_at ? fmtRel(c.last_event_at) : "–" }], d.results_databases) : empty("No results database configured – add a connector of type “Fraud engine results database”."),
+    { flush: true, sub: "Every scored transaction is written with its fraud score, profile scores, risk level, AML signal, decision, reasons and model / policy versions" })}</div>`;
+  const res = box.querySelector("#dbres");
+  box.querySelector("#dbtest").onclick = (e) => busy(e.currentTarget, async () => {
+    try { const r = await api.post("/system/database/test", { url: box.querySelector("#dburl").value });
+      res.innerHTML = `<div class="notice ${r.ok ? "ok" : "crit"}">${esc(r.detail)}</div>`; } catch (err) { errToast(err); } });
+  box.querySelector("#dbsave").onclick = async () => {
+    if (!(await confirmDialog("Change the fraud engine database", "VeriShield will use the new database after the service restarts. Continue?", "Save"))) return;
+    try { const r = await api.put("/system/database", { url: box.querySelector("#dburl").value, confirm: "CHANGE" });
+      res.innerHTML = `<div class="notice warn">${esc(r.message)}</div>`; } catch (err) { errToast(err); }
+  };
 }
 
 function fieldInputs(type, cfg = {}) {
   const fields = (TYPES[type] || {}).fields || [];
   const hint = { url: "https://bank.example/api/transactions (use {secret} for a password placeholder)", records_path: "e.g. data.items",
     poll_seconds: "seconds", host: "hostname or IP", port: "", path: "/path or file path", table: "table name", id_column: "monotonic id column (rowid for SQLite)",
-    rate: "transactions per second", fraud_ratio: "0.0 – 0.3", follow: "true/false", delimiter: ",", batch: "rows per poll" };
+    speed: "catch-up speed (x real time), e.g. 60", fraud_ratio: "0.0 – 0.3", backfill: "true = also write past decisions", follow: "true/false", delimiter: ",", batch: "rows per poll" };
   if (!fields.length) return '<p class="small muted">No connection settings – the bank pushes events to VeriShield with an API key.</p>';
-  return `<div class="form-grid">${fields.map((f) => `<label class="f">${esc(label(f))}<input class="input" name="cfg.${f}" value="${esc(cfg[f] ?? (type === "demo_stream" && f === "rate" ? 0.5 : type === "demo_stream" && f === "fraud_ratio" ? 0.05 : ""))}" placeholder="${esc(hint[f] || "")}"></label>`).join("")}</div>`;
+  return `<div class="form-grid">${fields.map((f) => `<label class="f">${esc(label(f))}<input class="input" name="cfg.${f}" value="${esc(cfg[f] ?? (type === "demo_stream" && f === "speed" ? 60 : type === "demo_stream" && f === "fraud_ratio" ? 0.03 : type === "db_results" && f === "table" ? "fraud_results" : ""))}" placeholder="${esc(hint[f] || "")}"></label>`).join("")}</div>`;
 }
 
 async function editConnector(c, done) {

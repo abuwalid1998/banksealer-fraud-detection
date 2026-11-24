@@ -65,8 +65,14 @@ CONNECTOR_TYPES: dict[str, dict] = {
              "fields": ["host", "port", "path", "schedule"], "auth": ["SSH_KEY", "BASIC"]},
     "outbound_webhook": {"label": "Bank execution adapter (outbound REST callback)", "direction": "OUTBOUND",
                          "runtime": True, "fields": ["url"], "auth": ["NONE", "BEARER", "HMAC_SIGNED", "MTLS"]},
-    "demo_stream": {"label": "Demo synthetic transaction stream", "direction": "INBOUND", "runtime": True,
-                    "fields": ["rate", "fraud_ratio"], "auth": ["NONE"], "demo_only": True},
+    "db_results": {"label": "Fraud engine results database (writes every decision)", "direction": "OUTBOUND",
+                   "runtime": True, "fields": ["url", "table", "batch", "poll_seconds", "backfill"],
+                   "auth": ["NONE", "VAULT_CREDENTIAL"],
+                   "help": "SQLAlchemy URL, e.g. postgresql://vs_writer:{secret}@dbhost:5432/fraud or "
+                           "sqlite:///C:/ProgramData/VeriShield/data/fraud_results.db. The table is created if "
+                           "missing; each scored transaction is written with its scores, decision and reasons."},
+    "demo_stream": {"label": "Payment gateway simulator (Demo workspace)", "direction": "INBOUND", "runtime": True,
+                    "fields": ["speed", "fraud_ratio"], "auth": ["NONE"], "demo_only": True},
 }
 STATUSES = ("DRAFT", "TESTING", "VALIDATED", "ENABLED", "DEGRADED", "DISABLED", "RETIRED")
 
@@ -319,6 +325,9 @@ def test_connection(db: Session, c: Connector, actor: str) -> dict:
         elif c.type in ("kafka", "rabbitmq", "jms", "sftp"):
             ok, message = _tcp_reachable(cfg.get("host", ""), int(cfg.get("port", 0) or 0))
             message += " (network reachability only - a broker/transfer client adapter is required to consume)"
+        elif c.type == "db_results":
+            from . import results_db
+            ok, message = results_db.test(_url(db, c), _safe_ident(cfg.get("table", "fraud_results")))
         elif c.type == "demo_stream":
             ok, message = c.space == "DEMO", "synthetic generator available" if c.space == "DEMO" else \
                 "only available in Demo Mode"
@@ -451,12 +460,42 @@ class _Runner(threading.Thread):
         return _records_from(payload, self.cfg.get("records_path", ""))
 
     def _demo_stream(self, state: dict) -> list:
-        from .demo import live_records
-        if "gen" not in state:
-            state["gen"] = live_records(self.tenant_id, float(self.cfg.get("fraud_ratio", 0.04)))
-        rate = float(self.cfg.get("rate", 0.5))
-        n = max(1, int(round(rate * float(self.cfg.get("poll_seconds", 2.0)))))
-        return [next(state["gen"]) for _ in range(n)]
+        from .demo import GatewaySimulator
+        if "sim" not in state:
+            resume = None
+            with SessionLocal() as db:
+                c = db.get(Connector, self.cid)
+                cur = (c.counters or {}).get("sim_cursor")
+            if cur:
+                resume = datetime.fromisoformat(cur) + timedelta(seconds=1)
+            state["sim"] = GatewaySimulator(self.tenant_id, float(self.cfg.get("fraud_ratio", 0.03)),
+                                            float(self.cfg.get("speed", 60)), start=resume)
+        sim = state["sim"]
+        records = sim.due(int(self.cfg.get("max_batch", 200)))
+        if records:
+            self.stats["sim_cursor"] = sim.cursor.isoformat(timespec="seconds")
+        return records
+
+    def _write_results(self, state: dict) -> None:
+        from . import results_db
+        with SessionLocal() as db:
+            if "engine" not in state:
+                c = db.get(Connector, self.cid)
+                state["engine"] = results_db.make_engine(_url(db, c))
+                state["table"] = _safe_ident(self.cfg.get("table", "fraud_results"))
+                cur = (c.counters or {}).get("cursor")
+                if cur is None:
+                    cur = 0 if self.cfg.get("backfill") else results_db.current_cursor(db, self.tenant_id, self.space)
+                state["cursor"] = int(cur)
+            written, state["cursor"] = results_db.write_new(db, state["engine"], state["table"], self.tenant_id,
+                                                            self.space, state["cursor"],
+                                                            int(self.cfg.get("batch", 500)))
+        self.stats["received"] += written
+        self.stats["accepted"] += written
+        self.stats["cursor"] = state["cursor"]
+        if written:
+            self.stats["batches"] += 1
+        self._persist()
 
     # loop ------------------------------------------------------------------
     def run(self) -> None:
@@ -474,6 +513,11 @@ class _Runner(threading.Thread):
         while not self.stop_event.is_set():
             started = time.perf_counter()
             try:
+                if self.ctype == "db_results":
+                    self._write_results(state)
+                    self.last_error = ""
+                    self.stop_event.wait(poll)
+                    continue
                 if self.ctype in ("tcp_json", "http_listener", "file_drop"):
                     records = self._drain_channel()
                 elif self.ctype == "db_replica":
@@ -514,6 +558,9 @@ class _Runner(threading.Thread):
                 counters = dict(c.counters or {})
                 for k in ("received", "accepted", "rejected", "duplicates", "batches"):
                     counters[k] = counters.get("base_" + k, 0) + self.stats[k]
+                for key in ("cursor", "sim_cursor"):
+                    if key in self.stats:
+                        counters[key] = self.stats[key]
                 c.counters = counters
                 if error:
                     c.last_error = self.last_error

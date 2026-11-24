@@ -15,6 +15,9 @@ const PAGES = {
   policies: () => import("./pages/policies.js"),
   operations: () => import("./pages/operations.js"),
   settings: () => import("./pages/settings.js"),
+  clusters: () => import("./pages/clusters.js"),
+  notifications: () => import("./pages/notifications.js"),
+  agents: () => import("./pages/agents.js"),
   account: () => import("./pages/account.js"),
 };
 const root = document.getElementById("root");
@@ -50,9 +53,11 @@ async function loadMe() {
 // ------------------------------------------------------------------ sign in
 function devAccounts() {
   if (!S.info || !S.info.dev_accounts) return "";
-  const rows = [["1000", "Admin", "IT Admin (bootstrap)"], ["2000", "Manager#2026", "AML Manager"],
-    ["3001", "Analyst1#2026", "AML Employee 1"], ["3002", "Analyst2#2026", "AML Employee 2"], ["4000", "Chief#2026", "Chief AML / Compliance"]];
-  return `<div class="notice devbox"><b>Local development accounts</b> – click to fill. Each temporary password must be changed at first sign-in (this list is hidden in production).
+  const rows = [["1000", "Admin", "IT Admin"], ["2000", "Manager#2026", "AML Manager"],
+    ["3001", "Analyst1#2026", "AML Employee 1"], ["3002", "Analyst2#2026", "AML Employee 2"], ["4000", "Chief#2026", "Chief AML / Compliance"],
+    ["5000", "Ceo#2026", "Chief Executive Officer"]];
+  const note = S.info.dev_fixed_passwords ? "Test accounts keep these passwords (no first-login change)." : "Each temporary password must be changed at first sign-in.";
+  return `<div class="notice devbox"><b>Test accounts</b> – click to fill. ${note} This list is hidden in production.
     <table>${rows.map((r) => `<tr data-u="${r[0]}" data-p="${esc(r[1])}"><td class="mono">${r[0]}</td><td class="mono">${esc(r[1])}</td><td>${r[2]}</td></tr>`).join("")}</table></div>`;
 }
 
@@ -71,9 +76,14 @@ function authLayout(inner) {
     <div class="panel"><div class="form">${inner}</div></div></div>`;
 }
 
+function clientLogo() {
+  return S.info && S.info.logo ? `<div class="client-logo"><img src="${esc(S.info.logo)}" alt="${esc(S.info.name || "")}"></div>` : "";
+}
+
 function renderLogin(message = "", mfa = false) {
   document.title = "Sign in · VeriShield";
-  root.innerHTML = authLayout(`<div class="card">
+  const reset = S.info && S.info.password_reset && (S.info.password_reset.email || S.info.password_reset.sms);
+  root.innerHTML = authLayout(`${clientLogo()}<div class="card">
       <h2 style="font-size:20px">${mfa ? "Verification code" : "Sign in"}</h2>
       <p class="muted small" style="margin:4px 0 16px">${mfa ? "Enter the 6-digit code from your authenticator app." : "Use your 4–5 digit VeriShield username."}</p>
       ${message ? `<div class="notice warn" style="margin-bottom:12px">${esc(message)}</div>` : ""}
@@ -84,8 +94,11 @@ function renderLogin(message = "", mfa = false) {
         <label class="f">Password<input class="input" name="password" type="password" autocomplete="current-password" required></label>`}
         <button class="btn primary" style="justify-content:center;padding:10px">${mfa ? "Verify" : "Sign in"}</button>
       </form>
+      ${mfa ? "" : `<div class="row" style="margin-top:12px;justify-content:space-between"><button class="linkbtn" id="forgot" type="button">Forgot password?</button>${reset ? "" : '<span class="tiny muted">Self-service reset needs e-mail or SMS</span>'}</div>`}
     </div>${mfa ? "" : devAccounts()}
     <p class="tiny muted" style="margin-top:14px;text-align:center">VeriShield ${S.info && S.info.environment === "production" ? "" : "· " + esc(S.info ? S.info.environment : "")} · <a href="/api/docs" target="_blank" rel="noopener">API documentation</a></p>`);
+  const fg = $("#forgot");
+  if (fg) fg.onclick = () => renderForgot($("[name=username]").value.trim());
   $$(".devbox tr").forEach((tr) => tr.addEventListener("click", () => {
     $("[name=username]").value = tr.dataset.u; $("[name=password]").value = tr.dataset.p;
   }));
@@ -103,6 +116,57 @@ function renderLogin(message = "", mfa = false) {
           if (r.mfa_required) return renderLogin("", true);
         }
         await loadMe();
+      } catch (err) { errToast(err); }
+    });
+  });
+}
+
+// ------------------------------------------------------------------ forgotten password
+function renderForgot(username = "", sent = null) {
+  document.title = "Reset password · VeriShield";
+  const pr = (S.info && S.info.password_reset) || {};
+  const chans = [["email", "E-mail"], ["sms", "SMS to my mobile"]].filter(([k]) => pr[k]);
+  let body;
+  if (!sent) {
+    body = `<h2 style="font-size:20px">Reset your password</h2>
+      <p class="muted small" style="margin:4px 0 16px">We send a one-time 6-digit code to the e-mail address or mobile number registered on your account.</p>
+      ${chans.length ? `<form id="fp" class="stack" style="gap:12px">
+        <label class="f">Username<input class="input" name="username" inputmode="numeric" value="${esc(username)}" required></label>
+        <label class="f">Send the code by<select class="input" name="channel">${chans.map(([k, l]) => `<option value="${k}">${l}</option>`).join("")}</select></label>
+        <button class="btn primary" style="justify-content:center;padding:10px">Send code</button></form>`
+      : `<div class="notice warn">Self-service reset is not available because no e-mail or SMS gateway is switched on. Ask your IT Admin to reset your password.</div>`}`;
+  } else {
+    body = `<h2 style="font-size:20px">Enter the code</h2>
+      <div class="notice ok" style="margin:10px 0 14px">${esc(sent.message)}</div>
+      ${sent.dev_code ? `<div class="notice warn" style="margin-bottom:12px">Development code: <b class="mono">${esc(sent.dev_code)}</b></div>` : ""}
+      <form id="rp" class="stack" style="gap:12px">
+        <label class="f">6-digit code<input class="input mono" name="code" inputmode="numeric" maxlength="8" value="${esc(sent.dev_code || "")}" required></label>
+        <label class="f">New password<span class="help">At least 10 characters with upper and lower case letters, a digit and a symbol.</span><input class="input" type="password" name="new_password" autocomplete="new-password" required></label>
+        <label class="f">Repeat new password<input class="input" type="password" name="repeat" autocomplete="new-password" required></label>
+        <button class="btn primary" style="justify-content:center;padding:10px">Set new password</button></form>`;
+  }
+  root.innerHTML = authLayout(`${clientLogo()}<div class="card">${body}</div><p class="center small" style="margin-top:12px"><a href="#" id="back">Back to sign in</a></p>`);
+  $("#back").onclick = (e) => { e.preventDefault(); renderLogin(); };
+  const fp = $("#fp");
+  if (fp) fp.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const f = formData(fp);
+    await busy(fp.querySelector("button"), async () => {
+      try {
+        const r = await api.post("/auth/forgot-password", { username: f.username.trim(), channel: f.channel, tenant: S.info && S.info.tenant });
+        renderForgot(f.username.trim(), { ...r, username: f.username.trim() });
+      } catch (err) { errToast(err); }
+    });
+  });
+  const rp = $("#rp");
+  if (rp) rp.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const f = formData(rp);
+    await busy(rp.querySelector("button"), async () => {
+      try {
+        if (f.new_password !== f.repeat) throw new Error("The new passwords do not match");
+        const r = await api.post("/auth/reset-password", { username: sent.username, code: f.code.trim(), new_password: f.new_password, tenant: S.info && S.info.tenant });
+        renderLogin(r.message);
       } catch (err) { errToast(err); }
     });
   });
@@ -130,6 +194,7 @@ async function renderSetup() {
       <label class="f">First name<input class="input" name="first_name" value="${esc(u.first_name)}" required></label>
       <label class="f">Last name<input class="input" name="last_name" value="${esc(u.last_name)}" required></label>
       <label class="f">E-mail<input class="input" type="email" name="email" value="${esc(u.email)}" required></label>
+      <label class="f">Mobile (for SMS codes, optional)<input class="input" name="phone" value="${esc(u.phone || "")}" placeholder="+970 59 ..."></label>
       <button class="btn primary">Save and continue</button></form>`;
   } else if (step === "VERIFY_EMAIL") {
     body = `<h2>Verify your e-mail</h2><p class="muted small">We send a 6-digit code to <b>${esc(u.email)}</b>.</p>
@@ -183,17 +248,26 @@ async function signOut() {
 function renderShell() {
   const m = S.me;
   const initials = (m.user.first_name[0] || "") + (m.user.last_name[0] || "") || m.user.username.slice(0, 2);
+  const groups = [["Monitor", ["overview", "transactions", "customers", "alerts"]], ["Investigate", ["cases", "decision", "reports"]],
+    ["Intelligence", ["models", "clusters", "policies"]], ["Administration", ["integrations", "operations", "notifications", "agents", "settings"]]];
+  const navHtml = groups.map(([g, ids]) => {
+    const items = m.navigation.filter((n) => ids.includes(n.id));
+    return items.length ? `<div class="grp">${g}</div>` + items.map((n) => `<a href="#/${n.id}" data-nav="${n.id}">${icon(n.id)}<span>${esc(n.label)}</span></a>`).join("") : "";
+  }).join("") + m.navigation.filter((n) => !groups.some(([, ids]) => ids.includes(n.id))).map((n) => `<a href="#/${n.id}" data-nav="${n.id}">${icon(n.id)}<span>${esc(n.label)}</span></a>`).join("");
+  if (m.tenant.primary_color) document.documentElement.style.setProperty("--client", m.tenant.primary_color);
   root.innerHTML = `<div class="app ${m.tenant.demo_mode ? "demo-on" : ""}">
     <aside class="sidebar" id="sidebar">
       <div class="brand">${LOGO}<div><div class="word">VERISHIELD</div><div class="tag">Transaction Intelligence</div></div></div>
-      <nav class="nav">${m.navigation.map((n) => `<a href="#/${n.id}" data-nav="${n.id}">${icon(n.id)}<span>${esc(n.label)}</span></a>`).join("")}</nav>
+      <div class="client-badge">${m.tenant.logo ? `<img src="${esc(m.tenant.logo)}" alt="${esc(m.tenant.name)}">` : `<div class="nm">${esc(m.tenant.name)}<small>${esc(m.tenant.id)} · ${esc(m.tenant.currency)}</small></div>`}</div>
+      <nav class="nav">${navHtml}</nav>
       <div class="foot">${esc(m.tenant.name)}<br>${esc(m.user.role_label)}${m.tenant.demo_mode ? '<br><b style="color:#E8A33A">Demo workspace</b>' : ""}</div>
     </aside>
     <div class="main">
-      ${m.tenant.demo_mode ? '<div class="demo-banner" role="status">DEMO MODE – LIVE SCORING · PAYMENT ACTIONS ARE SIMULATED</div>' : ""}
+      ${m.tenant.demo_mode ? '<div class="demo-banner" role="status">DEMO MODE – CHANNELS STREAM SYNTHETIC GATEWAY DATA · SCORES ARE COMPUTED LIVE · PAYMENT ACTIONS ARE SIMULATED</div>' : ""}
       <header class="topbar">
         <button class="btn ghost menu-toggle" id="menu-toggle" aria-label="Menu">${icon("menu")}</button>
         <div class="title"><div class="crumb" id="crumb">${esc(m.tenant.name)}</div><h1 id="page-title">Overview</h1></div>
+        <span class="wsbadge ${m.tenant.demo_mode ? "demo" : "live"}" title="Data space">${m.tenant.demo_mode ? "DEMO WORKSPACE" : "LIVE"}</span>
         <div class="pulse" id="pulse" title="Real-time scoring activity in this workspace"></div>
         <form class="search" id="gsearch" role="search">${icon("search")}<input class="input" name="q" placeholder="Search transaction, customer or case…" aria-label="Global search"></form>
         <div class="usermenu"><button id="um" aria-haspopup="true"><span class="avatar">${esc(initials.toUpperCase())}</span><span class="who"><b>${esc(m.user.name)}</b><span>${esc(m.user.role_label)} · ${esc(m.user.username)}</span></span></button></div>
@@ -204,7 +278,7 @@ function renderShell() {
   const pulse = async () => {
     const p = await api.get("/live/pulse");
     const on = p.channels_running > 0 || p.decisions_last_minute > 0;
-    $("#pulse").innerHTML = `<span class="livepill ${on ? "" : "off"}"><i></i>${on ? "LIVE" : "IDLE"}</span>
+    $("#pulse").innerHTML = `<span class="livepill ${on ? "" : "off"}"><i></i>${on ? "STREAMING" : "NO CHANNEL RUNNING"}</span>
       <span><b>${p.decisions_last_minute}</b> scored / min · <b>${p.channels_running}</b> channel${p.channels_running === 1 ? "" : "s"} running</span>
       ${p.last_decision ? `<span>last ${esc(p.last_decision.decision)} ${Number(p.last_decision.fraud_score).toFixed(2)} · ${esc(fmtRel(p.last_decision.at))}</span>` : ""}`;
   };

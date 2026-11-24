@@ -7,7 +7,7 @@ import threading
 from datetime import timedelta
 from typing import Optional
 
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from fastapi import APIRouter, Body, Depends, File, HTTPException, UploadFile
 from fastapi.responses import FileResponse, PlainTextResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select, text
@@ -38,18 +38,21 @@ class UserIn(BaseModel):
     email: str = Field(..., min_length=3, max_length=200)
     role: str
     temporary_password: Optional[str] = Field(None, max_length=100)
+    phone: Optional[str] = Field(None, max_length=32)
+    send_credentials: list[str] = Field(default_factory=list, description="email and/or sms")
 
 
 class UserPatch(BaseModel):
     first_name: Optional[str] = None
     last_name: Optional[str] = None
     email: Optional[str] = None
+    phone: Optional[str] = None
     role: Optional[str] = None
     extra_permissions: Optional[list[str]] = None
 
 
 def _user_out(u: User) -> dict:
-    d = row_dict(u, exclude=("password_hash", "mfa_secret", "email_code_hash"))
+    d = row_dict(u, exclude=("password_hash", "mfa_secret", "email_code_hash", "reset_code_hash"))
     d["role_label"] = ROLE_LABELS.get(u.role, u.role)
     d["name"] = u.full_name
     return d
@@ -96,14 +99,17 @@ def create_user(body: UserIn, p: Principal = Depends(require_user("users.manage"
     temp = body.temporary_password or temporary_password()
     hours = int(tenant.settings.get("security", {}).get("temp_password_hours", 72))
     user = User(tenant_id=p.tenant_id, username=body.username, first_name=body.first_name.strip(),
-                last_name=body.last_name.strip(), email=body.email.strip(), role=body.role, status="INVITED",
+                last_name=body.last_name.strip(), email=body.email.strip(), phone=(body.phone or "").strip(),
+                role=body.role, status="INVITED",
                 password_hash=hash_password(temp), must_change_password=True,
                 temp_password_expires_at=utcnow() + timedelta(hours=hours), created_by=p.user_id)
     db.add(user)
     db.commit()
     audit.record(db, p.tenant_id, "user.create", actor=p, resource_type="user", resource_id=user.id,
                  after={"username": user.username, "role": user.role, "email": user.email})
-    return {"user": _user_out(user), "temporary_password": temp,
+    delivery = _deliver_password(db, tenant, user, temp, body.send_credentials, "account_created", hours) \
+        if body.send_credentials else {}
+    return {"user": _user_out(user), "temporary_password": temp, "delivery": delivery,
             "note": f"Share the temporary password securely. It is shown only once, is single-use and expires in "
                     f"{hours} hours."}
 
@@ -123,7 +129,7 @@ def update_user(user_id: str, body: UserPatch, p: Principal = Depends(require_us
         _check_role_limit(db, db.get(Tenant, p.tenant_id), body.role, user.id)
         user.role = body.role
         user.extra_permissions = []
-    for field in ("first_name", "last_name", "email"):
+    for field in ("first_name", "last_name", "email", "phone"):
         value = getattr(body, field)
         if value is not None:
             setattr(user, field, value.strip())
@@ -140,9 +146,22 @@ def update_user(user_id: str, body: UserPatch, p: Principal = Depends(require_us
     return {"user": _user_out(user)}
 
 
+def _deliver_password(db: Session, tenant: Tenant, user: User, password: str, channels: list, event: str,
+                      hours: Optional[int]) -> dict:
+    from ..services import notify
+    chans = [c for c in channels if c in ("email", "sms")]
+    if not chans:
+        return {}
+    expiry = f" It is temporary, expires in {hours} hours and must be changed at sign-in." if hours else ""
+    text = (f"Your {tenant.display_name} VeriShield account: username {user.username}, password {password}.{expiry} "
+            "Do not share it.")
+    return notify.deliver_secret(db, tenant, user, "Your VeriShield sign-in details", text, chans, event)
+
+
 @router.post("/users/{user_id}/{action}")
-def user_action(user_id: str, action: str, p: Principal = Depends(require_user("users.manage")),
-                db: Session = Depends(get_db)):
+def user_action(user_id: str, action: str, body: Optional[dict] = Body(None),
+                p: Principal = Depends(require_user("users.manage")), db: Session = Depends(get_db)):
+    body = body or {}
     user = db.get(User, user_id)
     if user is None or user.tenant_id != p.tenant_id:
         raise HTTPException(404, {"code": "NOT_FOUND", "message": "user not found"})
@@ -165,19 +184,35 @@ def user_action(user_id: str, action: str, p: Principal = Depends(require_user("
         user.status = "ACTIVE" if not user.must_change_password else "INVITED"
         user.failed_logins = 0
     elif action == "reset-password":
+        # IT Admin password reset: generated temporary password (default) or a password the admin chooses;
+        # optionally delivered to the user by e-mail / SMS.
+        from ..security import password_problems
         tenant = db.get(Tenant, p.tenant_id)
-        temp = temporary_password()
         hours = int(tenant.settings.get("security", {}).get("temp_password_hours", 72))
+        chosen = str(body.get("password") or "")
+        require_change = bool(body.get("require_change", True))
+        if chosen:
+            problems = password_problems(chosen, tenant.settings.get("security", {}), user.username)
+            if problems:
+                raise HTTPException(422, {"code": "WEAK_PASSWORD", "message": "Password needs " + ", ".join(problems)})
+        temp = chosen or temporary_password()
         user.password_hash = hash_password(temp)
-        user.must_change_password = True
-        user.temp_password_expires_at = utcnow() + timedelta(hours=hours)
+        user.must_change_password = require_change
+        user.temp_password_expires_at = utcnow() + timedelta(hours=hours) if require_change else None
         user.reset_by, user.reset_at = p.user_id, utcnow()
         user.failed_logins = 0
-        if user.status == "LOCKED":
-            user.status = "INVITED"
+        user.reset_code_hash = None
+        if user.status == "LOCKED" or (user.status == "INVITED" and not require_change):
+            user.status = "INVITED" if require_change else "ACTIVE"
         for s in db.execute(select(UserSession).where(UserSession.user_id == user.id)).scalars():
             s.revoked = True
-        out = {"temporary_password": temp, "note": f"Shown once; expires in {hours} hours."}
+        db.commit()
+        delivery = _deliver_password(db, tenant, user, temp, body.get("notify") or [], "password_reset",
+                                     hours if require_change else None)
+        out = {"temporary_password": None if chosen else temp, "delivery": delivery,
+               "note": (f"Temporary password - must be changed at next sign-in; expires in {hours} hours."
+                        if require_change else "Password set; the user is not asked to change it.")
+               + (" Delivered: " + ", ".join(k for k, v in delivery.items() if v["sent"]) if delivery else "")}
     elif action == "reset-mfa":
         user.mfa_enabled = False
         user.mfa_secret = None
@@ -316,7 +351,16 @@ def public_info(db: Session = Depends(get_db)):
             "primary_color": b["primary_color"], "accent_color": b["accent_color"],
             "logo": f"/api/v1/public/logo/{t.id}" if b.get("logo_key") else None,
             "environment": settings.env, "bootstrap_pending": bootstrap_pending,
-            "dev_accounts": settings.seed_demo_users and settings.env == "development" and settings.show_dev_accounts}
+            "dev_accounts": settings.seed_demo_users and settings.env == "development" and settings.show_dev_accounts,
+            "dev_fixed_passwords": settings.demo_fixed_passwords,
+            "password_reset": _reset_channels(t)}
+
+
+def _reset_channels(t: Tenant) -> dict:
+    from ..services import notify
+    dev = settings.env != "production" and settings.show_dev_accounts
+    return {"email": notify.email_ready(t) or dev, "sms": notify.sms_ready(t) or dev,
+            "development_codes": dev and not (notify.email_ready(t) or notify.sms_ready(t))}
 
 
 # --------------------------------------------------------------------------- API clients

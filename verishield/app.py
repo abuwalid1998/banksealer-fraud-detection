@@ -14,7 +14,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from . import __version__
-from .api import admin, auth, cases, core, governance
+from .api import admin, auth, cases, core, governance, system
 from .services.metrics import metrics
 from .settings import settings
 
@@ -37,11 +37,16 @@ class _Jobs:
     def _run(self) -> None:
         from .db import SessionLocal
         from .services import decision, engine_registry
-        last_save = time.time()
+        last_save = last_health = time.time()
         while not self.stop.wait(30):
             try:
                 with SessionLocal() as db:
                     decision.expire_holds(db)
+                if time.time() - last_health > 1800:
+                    from .services import model_ops
+                    with SessionLocal() as db:
+                        model_ops.check_all(db)
+                    last_health = time.time()
                 if time.time() - last_save > 300:
                     engine_registry.save_all()
                     last_save = time.time()
@@ -124,9 +129,10 @@ def create_app() -> FastAPI:
         return JSONResponse({"detail": {"code": "INTERNAL_ERROR", "message": "Unexpected error - see server log",
                                         "type": type(exc).__name__}}, 500)
 
-    for module in (auth, admin, core, cases, governance):
+    for module in (auth, admin, core, cases, governance, system):
         app.include_router(module.router)
     app.include_router(admin.health_router)
+    app.include_router(system.mcp_router)
 
     app.mount("/static", StaticFiles(directory=WEB), name="static")
 

@@ -18,7 +18,7 @@ from ..deps import Principal, client_ip, current_principal, rate_limiter, sessio
 from ..models import ROLE_LABELS, Tenant, User, UserSession, utcnow
 from ..rbac import navigation_for, permissions_for
 from ..security import (decrypt_field, encrypt_field, hash_password, new_token, new_totp_secret, password_problems,
-                        token_hash, totp_uri, verify_password, verify_totp)
+                        token_hash, totp_uri, verify_password, verify_totp)  # noqa: F401
 from ..services.reports import branding
 from ..settings import settings
 
@@ -41,6 +41,7 @@ class ProfileIn(BaseModel):
     first_name: str = Field(..., min_length=1, max_length=80)
     last_name: str = Field(..., min_length=1, max_length=80)
     email: str = Field(..., min_length=3, max_length=200)
+    phone: Optional[str] = Field(None, max_length=32)
 
 
 class CodeIn(BaseModel):
@@ -57,7 +58,7 @@ def me_payload(db: Session, user: User, tenant: Tenant, restrictions: list) -> d
     return {
         "user": {"id": user.id, "username": user.username, "first_name": user.first_name,
                  "last_name": user.last_name, "name": user.full_name, "email": user.email,
-                 "email_verified": user.email_verified, "role": user.role, "role_label": ROLE_LABELS[user.role],
+                 "email_verified": user.email_verified, "phone": user.phone or "", "role": user.role, "role_label": ROLE_LABELS[user.role],
                  "mfa_enabled": user.mfa_enabled, "status": user.status,
                  "last_login_at": user.last_login_at.isoformat() + "Z" if user.last_login_at else None},
         "tenant": {"id": tenant.id, "name": tenant.display_name, "legal_name": tenant.legal_name,
@@ -194,6 +195,8 @@ def update_profile(body: ProfileIn, p: Principal = Depends(current_principal), d
     if body.email.strip().lower() != (user.email or "").lower():
         user.email_verified = False
     user.first_name, user.last_name, user.email = body.first_name.strip(), body.last_name.strip(), body.email.strip()
+    if body.phone is not None:
+        user.phone = body.phone.strip()
     db.commit()
     audit.record(db, p.tenant_id, "user.profile_update", actor=p, resource_type="user", resource_id=user.id,
                  before=before, after={"first_name": user.first_name, "last_name": user.last_name, "email": user.email})
@@ -239,7 +242,10 @@ def email_send_code(p: Principal = Depends(current_principal), db: Session = Dep
     code = f"{secrets.randbelow(900000) + 100000}"
     user.email_code_hash = hashlib.sha256(f"{user.id}:{code}".encode()).hexdigest()
     db.commit()
-    sent = _send_mail(user.email, "VeriShield e-mail verification", f"Your VeriShield verification code is {code}.")
+    from ..services import notify
+    tenant = db.get(Tenant, p.tenant_id)
+    sent = notify.send_email(db, tenant, user.email, "E-mail verification code",
+                             f"Your VeriShield verification code is {code}.", "email_verification", sensitive=True)[0]
     out = {"sent": sent}
     if not sent:
         log.warning("e-mail delivery not configured - verification code for %s is %s", user.username, code)
@@ -262,27 +268,103 @@ def email_verify(body: CodeIn, p: Principal = Depends(current_principal), db: Se
     return me_payload(db, user, tenant, session_restrictions(user, tenant, tenant_mfa_required(tenant, user.role)))
 
 
-def _send_mail(to: str, subject: str, text: str) -> bool:
-    import os
-    import smtplib
-    from email.message import EmailMessage
+# --------------------------------------------------------------------------- forgotten password
+class ForgotIn(BaseModel):
+    username: str = Field(..., min_length=1, max_length=10)
+    tenant: Optional[str] = None
+    channel: str = Field("email", description="email or sms")
 
-    host = os.environ.get("VERISHIELD_SMTP_HOST")
-    if not host:
-        return False
-    msg = EmailMessage()
-    msg["From"] = os.environ.get("VERISHIELD_SMTP_FROM", "verishield@localhost")
-    msg["To"] = to
-    msg["Subject"] = subject
-    msg.set_content(text)
-    try:
-        with smtplib.SMTP(host, int(os.environ.get("VERISHIELD_SMTP_PORT", "587")), timeout=10) as s:
-            if os.environ.get("VERISHIELD_SMTP_TLS", "true").lower() != "false":
-                s.starttls()
-            if os.environ.get("VERISHIELD_SMTP_USER"):
-                s.login(os.environ["VERISHIELD_SMTP_USER"], os.environ.get("VERISHIELD_SMTP_PASSWORD", ""))
-            s.send_message(msg)
-        return True
-    except Exception as exc:  # noqa: BLE001
-        log.error("SMTP delivery failed: %s", exc)
-        return False
+
+class ResetIn(BaseModel):
+    username: str = Field(..., min_length=1, max_length=10)
+    tenant: Optional[str] = None
+    code: str = Field(..., min_length=4, max_length=12)
+    new_password: str = Field(..., max_length=200)
+
+
+RESET_MINUTES = 15
+
+
+def _reset_hash(user: User, code: str) -> str:
+    return hashlib.sha256(f"reset:{user.id}:{code}:{settings.secret_key}".encode()).hexdigest()
+
+
+@router.post("/forgot-password")
+def forgot_password(body: ForgotIn, request: Request, db: Session = Depends(get_db)):
+    """Send a one-time reset code by e-mail or SMS. The answer never reveals whether the account exists."""
+    from ..services import notify
+    ip = client_ip(request)
+    if not rate_limiter.allow(f"forgot:{ip}", 6):
+        raise HTTPException(429, {"code": "RATE_LIMITED", "message": "Too many requests; wait a minute"})
+    tenant = db.get(Tenant, (body.tenant or settings.tenant_code).strip().upper())
+    channel = body.channel.lower()
+    generic = {"ok": True, "message": f"If the account exists and has a registered "
+                                      f"{'mobile number' if channel == 'sms' else 'e-mail address'}, a 6-digit code "
+                                      f"has been sent. It is valid for {RESET_MINUTES} minutes."}
+    if tenant is None or channel not in ("email", "sms"):
+        return generic
+    user = db.execute(select(User).where(User.tenant_id == tenant.id, User.username == body.username.strip())
+                      ).scalar()
+    if user is None or user.status == "DISABLED":
+        audit.record(db, tenant.id, "auth.forgot_password", actor=f"user {body.username[:10]}", outcome="FAILURE",
+                     reason="unknown or disabled account", ip=ip)
+        return generic
+    if not rate_limiter.allow(f"forgot-user:{user.id}", 3, 600):
+        return generic
+    code = f"{secrets.randbelow(900000) + 100000}"
+    user.reset_code_hash = _reset_hash(user, code)
+    user.reset_code_expires_at = utcnow() + timedelta(minutes=RESET_MINUTES)
+    user.reset_attempts = 0
+    db.commit()
+    text = (f"Your {tenant.display_name} VeriShield password reset code is {code}. It expires in "
+            f"{RESET_MINUTES} minutes. If you did not ask for it, contact your IT Admin.")
+    res = notify.deliver_secret(db, tenant, user, "Password reset code", text, [channel], "password_reset")
+    sent = res.get(channel, {}).get("sent", False)
+    audit.record(db, tenant.id, "auth.forgot_password", actor=user, ip=ip, outcome="SUCCESS" if sent else "FAILURE",
+                 reason=f"code via {channel}" + ("" if sent else f" not delivered: {res.get(channel, {}).get('detail')}"))
+    out = dict(generic)
+    if not sent and settings.env != "production" and settings.show_dev_accounts:
+        out["dev_code"] = code
+        out["message"] += (f" (Development: {channel.upper()} delivery is not configured, so the code is shown here "
+                           "and must never be shown in production.)")
+    return out
+
+
+@router.post("/reset-password")
+def reset_password(body: ResetIn, request: Request, db: Session = Depends(get_db)):
+    ip = client_ip(request)
+    if not rate_limiter.allow(f"reset:{ip}", 10):
+        raise HTTPException(429, {"code": "RATE_LIMITED", "message": "Too many attempts; wait a minute"})
+    tenant = db.get(Tenant, (body.tenant or settings.tenant_code).strip().upper())
+    user = db.execute(select(User).where(User.tenant_id == tenant.id, User.username == body.username.strip())
+                      ).scalar() if tenant else None
+    bad = HTTPException(400, {"code": "INVALID_CODE", "message": "The code is invalid or has expired"})
+    if user is None or not user.reset_code_hash or user.status == "DISABLED":
+        raise bad
+    if (user.reset_code_expires_at and user.reset_code_expires_at < utcnow()) or user.reset_attempts >= 5:
+        user.reset_code_hash = None
+        db.commit()
+        raise bad
+    if not secrets.compare_digest(user.reset_code_hash, _reset_hash(user, body.code.strip())):
+        user.reset_attempts += 1
+        db.commit()
+        audit.record(db, tenant.id, "auth.reset_password", actor=user, outcome="FAILURE", reason="wrong code", ip=ip)
+        raise bad
+    problems = password_problems(body.new_password, tenant.settings.get("security", {}), user.username)
+    if problems:
+        raise HTTPException(422, {"code": "WEAK_PASSWORD", "message": "Password needs " + ", ".join(problems)})
+    user.password_hash = hash_password(body.new_password)
+    user.must_change_password = False
+    user.temp_password_expires_at = None
+    user.password_changed_at = utcnow()
+    user.reset_code_hash = None
+    user.reset_attempts = 0
+    user.failed_logins = 0
+    if user.status in ("LOCKED", "INVITED"):
+        user.status = "ACTIVE"
+    for sess in db.execute(select(UserSession).where(UserSession.user_id == user.id)).scalars():
+        sess.revoked = True
+    db.commit()
+    audit.record(db, tenant.id, "auth.reset_password", actor=user, resource_type="user", resource_id=user.id, ip=ip,
+                 reason="self-service reset with one-time code")
+    return {"ok": True, "message": "Password changed - sign in with your new password."}

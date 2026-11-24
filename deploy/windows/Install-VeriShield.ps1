@@ -24,7 +24,7 @@
 
 .EXAMPLE
     .\Install-VeriShield.ps1 -Mode Pilot -AllowedClients "10.10.0.0/16"
-    Pilot install: development accounts (2000 / 3001 / 3002 / 4000) are created, MFA optional,
+    Pilot install: test accounts (2000 / 3001 / 3002 / 4000 / 5000) are created with fixed passwords, MFA optional,
     only clients from 10.10.0.0/16 can connect.
 
 .EXAMPLE
@@ -469,7 +469,8 @@ if ($scheme -eq "https" -and $Https -eq "SelfSigned") {
 }
 if ($Mode -eq "Pilot") {
     $summary.Add("")
-    $summary.Add("Pilot accounts (temporary passwords, changed at first sign-in): 2000 Manager#2026, 3001 Analyst1#2026, 3002 Analyst2#2026, 4000 Chief#2026")
+    $summary.Add("Pilot test accounts (passwords stay valid): 1000 Admin, 2000 Manager#2026, 3001 Analyst1#2026, 3002 Analyst2#2026, 4000 Chief#2026, 5000 Ceo#2026 (CEO)")
+    $summary.Add("Demo channels are stopped until the IT Admin starts them (Integrations & Channels).")
 }
 Set-Content -Path (Join-Path $DataDir "INSTALL-SUMMARY.txt") -Value $summary -Encoding UTF8
 Write-Host ""

@@ -156,10 +156,13 @@ def tx_out(tx: Transaction, dec: Optional[Decision], masked: bool) -> dict:
          "decision": dec.decision if dec else None, "fraud_score": dec.fraud_score if dec else None,
          "risk_level": dec.risk_level if dec else None, "aml_signal_level": dec.aml_signal_level if dec else None,
          "reason_codes": dec.reason_codes if dec else [], "issued_at": iso(dec.issued_at) if dec else None,
-         "scenario": tx.scenario if tx.space == "DEMO" else None, "label": tx.label if tx.space == "DEMO" else None}
+         "scenario": tx.scenario if tx.space == "DEMO" else None, "label": tx.label if tx.space == "DEMO" else None,
+         "beneficiary_name": (tx.details or {}).get("beneficiary_name"), "purpose": (tx.details or {}).get("purpose"),
+         "city": (tx.details or {}).get("city"), "device": tx.device_ref or (tx.details or {}).get("device")}
     if masked:
         d.update({"customer_ref": mask(tx.customer_ref, 2), "beneficiary": mask(tx.beneficiary), "ip": mask_ip(tx.ip),
-                  "amount": None, "masked": True})
+                  "amount": None, "masked": True, "beneficiary_name": mask(d["beneficiary_name"]) if d["beneficiary_name"]
+                  else None, "device": None})
     return d
 
 
@@ -608,6 +611,10 @@ def dashboard(p: Principal = Depends(require()), db: Session = Depends(get_db)):
             for ts, lvl in risk_trend:
                 rt[ts.strftime("%Y-%m-%d")][lvl] += 1
             out["risk_trend"] = [{"day": d, **dict(c)} for d, c in sorted(rt.items())]
+
+    elif role == "CEO":
+        from ..services.executive import overview
+        out.update(overview(db, p.tenant_id, p.space, 30))
 
     elif role == "AML_EMPLOYEE":
         mine = db.execute(case_service.case_query(p)).scalars().all()

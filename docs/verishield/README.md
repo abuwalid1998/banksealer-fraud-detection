@@ -36,46 +36,69 @@ recent decisions, alerts and sample cases). This takes a few seconds.
 
 ### Live data channels (also in Demo Mode)
 
-Four live channels are created and enabled automatically in the Demo workspace. Everything they receive is
-scored in real time by the engine, AML indicators and rules, and the dashboards, transaction list, alert queue,
-customer scores and channel counters refresh on their own (the top bar shows the live scoring rate).
+Demo Mode prepares customers (KYC), a 45-day historical import and real models trained on it – **nothing is
+pre-scored**. Channels are created tested but stopped; the **IT Admin starts them** in *Integrations & Channels*.
+Every transaction a running channel delivers is scored by the engine, AML indicators and rules, stored, and written
+to the **fraud engine results database**. Dashboards, lists, alerts and counters refresh on their own.
 
 | Channel | How to send data |
 |---|---|
-| Live payment stream | Built-in synthetic payment switch, 0.5 payments/s (`VERISHIELD_DEMO_STREAM_RATE`) |
+| Payment gateway simulator | Realistic Palestinian retail / business activity (ILS, Sat–Thu working week, salary week, Jawwal / Ooredoo, PS IBANs with bank codes, named beneficiaries and purposes, cities, devices, ~3 % fraud scenarios). Streams from yesterday 00:00, catches up at 60× (`VERISHIELD_DEMO_STREAM_SPEED`) and then continues in real time – timestamps are never in the future |
 | TCP JSON-lines feed | one JSON transaction per line to `127.0.0.1:9009` |
 | HTTP webhook listener | `POST http://127.0.0.1:9010/transactions` with a JSON object or list |
 | CSV drop file | append rows to `data/verishield/incoming/transactions.csv` |
+| Fraud engine results database | outbound: writes each decision (scores, risk, AML signal, reasons, model / policy versions) to any SQLAlchemy database, e.g. the bank's PostgreSQL |
 | Decision / events API | create an API key in *Users & Settings › API clients*, then call `/api/v1/decisions/evaluate` |
 
-Feed realistic traffic for the demo customers from a second terminal:
+Feed extra traffic from a second terminal (start the TCP / HTTP channel first):
 
 ```bash
 python mock_channel/generate_transactions.py --verishield --output tcp --port 9009
 ```
-```bash
-python mock_channel/generate_transactions.py --verishield --output http --url http://127.0.0.1:9010/transactions --batch 5
-```
 
-Any other connector (REST pull, database replica, file, TCP, HTTP) can also be added and enabled in Demo Mode.
-Only outbound payment actions (release / reject sent to the bank) are simulated in the Demo workspace.
+The primary fraud engine database (SQLite or PostgreSQL) is shown and can be changed (test → save → restart) under
+*Integrations & Channels › Fraud engine database*. Only outbound payment actions are simulated in the Demo workspace.
 
-### Sign-in accounts (development)
+### Sign-in accounts (test / pilot)
 
-| Username | Temporary password | Role |
+| Username | Password | Role |
 |---|---|---|
-| `1000` | `Admin` | IT Admin (bootstrap – must also complete name/e-mail) |
+| `1000` | `Admin` | IT Admin |
 | `2000` | `Manager#2026` | AML Manager |
 | `3001` | `Analyst1#2026` | AML Employee 1 |
 | `3002` | `Analyst2#2026` | AML Employee 2 |
 | `4000` | `Chief#2026` | Chief AML / Compliance |
+| `5000` | `Ceo#2026` | Chief Executive Officer (read-only executive overview and board reports) |
 
-Every temporary password is single-use: the first sign-in forces a new password (≥10 characters with
-upper/lower case, digit and symbol, not containing the username). The list is shown on the sign-in page
-only in development; with `VERISHIELD_ENV=production` only the bootstrap admin is created.
+In development / pilot installs these passwords stay valid – no first-login change (`VERISHIELD_DEMO_FIXED_PASSWORDS`,
+default on outside production). With `VERISHIELD_ENV=production` only the bootstrap admin is created and every
+temporary password must be changed at first sign-in. **Forgot password?** on the sign-in page sends a one-time code by
+e-mail or SMS (in development, when no gateway is switched on, the code is shown on screen).
+
+### What's new in 1.2
+
+* **IT Admin-started channels** and the **results database** writer (above); realistic gateway simulator.
+* **Client-branded formal reports** – the institution's logo, name, colours, department and classification; no vendor
+  header; document-control table, numbered sections, landscape pages for wide tables, sign-off table. Upload the logo
+  in *Users & Settings › Report branding*. New board reports: board overview, transaction activity, customer portfolio.
+* **E-mail & SMS** (IT Admin) – the bank's SMTP relay and HTTP SMS gateway, each ON / OFF, secrets in the vault, test
+  send, outbox. Used for password codes, new-account credentials, case assignment and critical alerts.
+* **Passwords** – forgot-password flow; IT Admin reset with a generated or chosen password, optional forced change,
+  delivery by e-mail / SMS.
+* **Customer Clusters** (AML Manager, Chief, CEO) – PCA maps of the k-means customer segments and of the engine's
+  DBSCAN / CBLOF peer groups, segment profiles, risk mix and the most unusual customers.
+* **Models** (IT Admin) – *Health & retraining* (model age, new data, unseen customers, under-trained profiles, score
+  PSI drift, intervention drift, analyst feedback, amount drift, segmentation quality → OK / consider / retrain
+  recommended, checked every 30 minutes with an operations incident), *Model settings* (profile weights, HBOS,
+  temporal window, DBSCAN / CBLOF, k range), retrain with a training window and shadow / activate, and *How it was
+  built* for every version (hyperparameters, data, features).
+* **CEO role** (`5000`) with an institution-wide executive overview.
+* **AI Agents (MCP)** – ON / OFF, allowed tools, access keys, a built-in HTTP endpoint `/mcp` (plus the stdio bridge),
+  copy-ready Claude configuration and an audit of every agent call.
 
 ### A 10-minute tour
 
+0. **1000 (IT Admin)** → *Integrations & Channels* → **Start streaming** (nothing is scored until a channel runs).
 1. **2000 (Manager)** → *Overview*: alerts, held payments, analyst workload, 14-day outcomes.
 2. *Alerts* → tick an alert → **Create case from selected** → assign to an analyst.
 3. *Decision Console* → **Fill a risky example** → *Evaluate*; or inject a demo scenario
@@ -85,10 +108,11 @@ only in development; with `VERISHIELD_ENV=production` only the bootstrap admin i
 5. Back as **2000** → open the case → **Record disposition** (e.g. *Release transaction*: in Demo Mode the
    bank is simulated) → *Investigation report* (branded PDF).
 6. *Policies & Thresholds* → **New draft** → change a threshold → **Simulate impact** → **Publish**.
-7. **1000 (IT Admin)** → *Integrations & Channels*: the live channels are already running; watch the counters move,
-   or add another channel (Test → Enable). *Users & Settings*: users, security policy, branding & logo, API keys,
+7. **1000 (IT Admin)** → *Integrations & Channels* → **Start streaming** on the payment gateway simulator and
+   **Start writing results** on the results database; watch the counters move. *Users & Settings*: users, security policy, branding & logo, API keys,
    Demo Mode reset. *Operations & Audit*: health, incidents, hash-chained audit trail.
-8. **4000 (Chief)** → executive oversight dashboard and reports.
+8. **4000 (Chief)** → executive oversight dashboard and reports. **5000 (CEO)** → executive overview, *Customer
+   Clusters*, board reports.
 
 Run the tests: `python -m pytest tests -q` (the VeriShield suite also runs against PostgreSQL with
 `VERISHIELD_TEST_DATABASE_URL=postgresql+psycopg://user@host/db`).

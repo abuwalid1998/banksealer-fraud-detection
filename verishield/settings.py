@@ -47,10 +47,10 @@ class Settings:
     tenant_timezone: str = "Asia/Hebron"
     seed_demo: bool = True                    # create synthetic demo data on first start
     seed_demo_users: bool = True              # create the other four initial accounts (temporary passwords)
-    demo_customers: int = 180
+    demo_customers: int = 600
     demo_history_days: int = 45
     demo_live_channels: bool = True           # create & enable ready-to-use live channels in Demo Mode
-    demo_stream_rate: float = 0.5             # synthetic payments per second on the built-in stream
+    demo_stream_speed: float = 60.0           # gateway simulator catch-up speed (x real time) before real time
     demo_tcp_port: int = 9009
     demo_http_port: int = 9010
     bootstrap_username: str = "1000"
@@ -61,6 +61,7 @@ class Settings:
     ssl_keyfile: str = ""                     # PEM private key
     log_file: str = ""                        # rotating log file (Windows service / server installs)
     show_dev_accounts: bool = True            # list development accounts on the sign-in page
+    demo_fixed_passwords: bool = True         # test accounts keep their passwords (no first-login change)
     background_jobs: bool = True
     engine_config: Path = ROOT / "config" / "banksealer.yaml"
 
@@ -127,10 +128,10 @@ def load_settings() -> Settings:
         tenant_timezone=os.environ.get("VERISHIELD_TENANT_TIMEZONE", "Asia/Hebron"),
         seed_demo=_bool("VERISHIELD_SEED_DEMO", True),
         seed_demo_users=_bool("VERISHIELD_SEED_DEMO_USERS", not production),
-        demo_customers=int(os.environ.get("VERISHIELD_DEMO_CUSTOMERS", "180")),
+        demo_customers=int(os.environ.get("VERISHIELD_DEMO_CUSTOMERS", "600")),
         demo_history_days=int(os.environ.get("VERISHIELD_DEMO_HISTORY_DAYS", "45")),
         demo_live_channels=_bool("VERISHIELD_DEMO_LIVE_CHANNELS", True),
-        demo_stream_rate=float(os.environ.get("VERISHIELD_DEMO_STREAM_RATE", "0.5")),
+        demo_stream_speed=float(os.environ.get("VERISHIELD_DEMO_STREAM_SPEED", "60")),
         demo_tcp_port=int(os.environ.get("VERISHIELD_DEMO_TCP_PORT", "9009")),
         demo_http_port=int(os.environ.get("VERISHIELD_DEMO_HTTP_PORT", "9010")),
         bootstrap_username=os.environ.get("VERISHIELD_BOOTSTRAP_USERNAME", "1000"),
@@ -142,6 +143,7 @@ def load_settings() -> Settings:
         ssl_keyfile=os.environ.get("VERISHIELD_SSL_KEYFILE", ""),
         log_file=os.environ.get("VERISHIELD_LOG_FILE", ""),
         show_dev_accounts=_bool("VERISHIELD_SHOW_DEV_ACCOUNTS", not production),
+        demo_fixed_passwords=_bool("VERISHIELD_DEMO_FIXED_PASSWORDS", not production),
     )
 
 

@@ -42,6 +42,11 @@ ALL_PERMISSIONS = {
     "reports.aml": "Generate AML, transaction and customer reports",
     "reports.assigned": "Generate assigned-case reports",
     "reports.executive": "Generate executive/compliance reports",
+    "reports.board": "Generate board-level reports on the system, transactions and customers",
+    "executive.overview": "Institution-wide executive overview (CEO)",
+    "notifications.manage": "Configure SMTP e-mail and SMS gateways",
+    "mcp.manage": "Configure AI-agent (MCP) access",
+    "models.clusters": "View customer clusters and how the models group them",
 }
 
 ROLE_PERMISSIONS: dict[str, set[str]] = {
@@ -49,12 +54,13 @@ ROLE_PERMISSIONS: dict[str, set[str]] = {
         "users.manage", "connectors.manage", "connectors.view", "system.view", "system.summary", "tenant.manage",
         "api_clients.manage", "demo.manage", "audit.view", "models.train", "models.activate", "models.view",
         "tx.view_masked", "customers.view_masked", "decisions.test", "policies.view", "reports.system",
+        "notifications.manage", "mcp.manage",
     },
     "AML_MANAGER": {
         "system.summary", "models.view", "models.activate", "tx.view_full", "customers.view_full", "decisions.test",
         "alerts.view_all", "alerts.triage", "cases.view_all", "cases.create", "cases.assign", "cases.note",
         "cases.dispose", "policies.view", "policies.edit", "branding.reports", "reports.aml",
-        "reports.assigned",
+        "reports.assigned", "models.clusters",
     },
     "AML_EMPLOYEE": {
         "tx.view_assigned", "customers.view_assigned", "cases.view_assigned", "cases.note", "cases.recommend",
@@ -63,7 +69,13 @@ ROLE_PERMISSIONS: dict[str, set[str]] = {
     "CHIEF_AML": {
         "system.summary", "connectors.view", "models.view", "tx.view_full", "customers.view_full",
         "alerts.view_all", "cases.view_all", "policies.view", "audit.view", "reports.aml", "reports.executive",
-        "reports.assigned",
+        "reports.assigned", "models.clusters",
+    },
+    # Read-only institution-wide view: everything needed to understand the system, never to change it.
+    "CEO": {
+        "executive.overview", "system.summary", "connectors.view", "models.view", "models.clusters",
+        "tx.view_full", "customers.view_full", "alerts.view_all", "cases.view_all", "policies.view",
+        "reports.board", "reports.executive", "reports.aml", "reports.system",
     },
 }
 
@@ -88,9 +100,12 @@ NAVIGATION = [
     ("decision", "Decision Console", ("decisions.test",)),
     ("reports", "Reports", ("reports.system", "reports.aml", "reports.assigned", "reports.executive")),
     ("models", "Models & Segments", ("models.view",)),
+    ("clusters", "Customer Clusters", ("models.clusters",)),
     ("integrations", "Integrations & Channels", ("connectors.view", "connectors.manage")),
     ("policies", "Policies & Thresholds", ("policies.view",)),
     ("operations", "Operations & Audit", ("system.view", "audit.view")),
+    ("notifications", "E-mail & SMS", ("notifications.manage",)),
+    ("agents", "AI Agents (MCP)", ("mcp.manage",)),
     ("settings", "Users & Settings", ("users.manage", "tenant.manage")),
 ]
 
