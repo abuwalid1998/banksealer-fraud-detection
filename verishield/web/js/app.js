@@ -18,6 +18,9 @@ const PAGES = {
   clusters: () => import("./pages/clusters.js"),
   notifications: () => import("./pages/notifications.js"),
   agents: () => import("./pages/agents.js"),
+  screening: () => import("./pages/screening.js"),
+  reviews: () => import("./pages/reviews.js"),
+  str: () => import("./pages/str.js"),
   account: () => import("./pages/account.js"),
 };
 const root = document.getElementById("root");
@@ -248,7 +251,7 @@ async function signOut() {
 function renderShell() {
   const m = S.me;
   const initials = (m.user.first_name[0] || "") + (m.user.last_name[0] || "") || m.user.username.slice(0, 2);
-  const groups = [["Monitor", ["overview", "transactions", "customers", "alerts"]], ["Investigate", ["cases", "decision", "reports"]],
+  const groups = [["Monitor", ["overview", "transactions", "customers", "alerts"]], ["Investigate", ["cases", "screening", "reviews", "str", "decision", "reports"]],
     ["Intelligence", ["models", "clusters", "policies"]], ["Administration", ["integrations", "operations", "notifications", "agents", "settings"]]];
   const navHtml = groups.map(([g, ids]) => {
     const items = m.navigation.filter((n) => ids.includes(n.id));

@@ -23,8 +23,9 @@ from mock_channel.generator import PS_CITIES, PS_COMPANIES, PS_FIRST, PS_LAST, T
 from .. import audit
 from ..deps import Principal
 from ..models import (Alert, ApiClient, Case, CaseEntityLink, CaseEvent, CaseNote, Connector, Customer,
-                      CustomerSegment, DeadLetterEvent, Decision, EvidenceReference, ExecutionStatusEvent,
-                      ModelVersion, ReportJob, Tenant, Transaction, User, utcnow)
+                      CustomerConfirmation, CustomerReview, CustomerSegment, DeadLetterEvent, Decision,
+                      EvidenceReference, ExecutionStatusEvent, LoginEvent, ModelVersion, ReportJob, ReportSchedule,
+                      ScreeningMatch, StrReport, Tenant, Transaction, User, WatchlistEntry, utcnow)
 from ..settings import settings
 from . import cases as case_service
 from . import engine_registry, segmentation
@@ -43,6 +44,10 @@ SCENARIOS = {
     "structuring": "Amounts just below the reporting threshold (structuring indicator)",
     "turnover": "Unusual customer turnover vs declared profile",
     "shared_counterparty": "Multi-account / shared counterparty pattern",
+    "card_testing": "Card testing: tiny online payments to unknown foreign merchants, then a large one",
+    "atm_cashout": "Cloned card emptied at ATMs in other cities at night",
+    "mule_passthrough": "Mule account: several unknown senders, money sent abroad within hours",
+    "cash_structuring": "Several cash deposits just below 10,000 the same day",
 }
 FIRST = ("Rami", "Lina", "Omar", "Dana", "Sami", "Hala", "Yousef", "Maya", "Karim", "Nour", "Tariq", "Reem", "Fadi",
          "Salma", "Ziad", "Aya", "Hani", "Rana", "Majd", "Leen")
@@ -90,6 +95,12 @@ def _customer_row(tenant: Tenant, c, rng: random.Random) -> Customer:
         name = f"{rng.choice(FIRST)} {rng.choice(LAST)}"
     mean_amount = 2.718281828 ** (c.amount_mu + c.amount_sigma ** 2 / 2)
     turnover = c.transfer_rate * 30 * mean_amount * rng.uniform(0.8, 1.5) + c.recharge_rate * 30 * 20
+    # card spending, cash and incoming money (salary, remittances, business receipts) are part of the turnover
+    turnover += c.card_rate * 30 * 180 + c.cash_out_rate * 30 * 650 + c.salary + (c.remitter[2] if c.remitter else 0)
+    if c.cash_in_rate:
+        turnover += c.cash_in_rate * 30 * 2.718281828 ** (c.cash_in_mu + 0.125)
+    if c.receipts_rate:
+        turnover += c.receipts_rate * 30 * mean_amount
     products = ["current_account", "mobile_banking"]
     if c.prepaid_rate:
         products.append("prepaid_card")
@@ -108,7 +119,9 @@ def _customer_row(tenant: Tenant, c, rng: random.Random) -> Customer:
                     account_purpose="Business operations" if business else rng.choice(
                         ["Salary and personal expenses", "Family support", "Savings and bill payments"]),
                     attributes={"synthetic": True, "persona_segment": c.segment, "city": c.city or "",
-                                "home_branch": f"{c.city} branch" if c.city else ""})
+                                "home_branch": f"{c.city} branch" if c.city else "",
+                                "phone": c.phones[0] if c.phones else "",
+                                "national_id": f"4{int(c.user_id[1:]) * 7919 % 10 ** 8:08d}"})
 
 
 def seed(db: Session, tenant_id: str, actor: str = "system", with_cases: bool = False) -> dict:
@@ -162,6 +175,11 @@ def seed(db: Session, tenant_id: str, actor: str = "system", with_cases: bool = 
         if n_hist % 2000 == 0:
             db.commit()
     db.commit()
+
+    from . import operations, screening
+    screening.seed_demo(db, tenant.id)
+    screening.screen_customers(db, tenant.id, "DEMO")
+    operations.schedule_reviews(db, tenant.id, "DEMO")
 
     seg = segmentation.build_segmentation(db, tenant.id, "DEMO", actor)
     segmentation.activate_segmentation(db, seg.id, actor)
@@ -331,6 +349,8 @@ def _scenario_records(gen: TransactionGenerator, scenario: str, persona, rng: ra
             for r in recs:
                 r["amount"] = max(r["amount"], 6000.0)
         return recs
+    if scenario in ("card_testing", "atm_cashout", "mule_passthrough", "cash_structuring"):
+        return gen._ps_fraud(persona, at, scenario)
     if scenario == "structuring":
         recs = []
         for _ in range(4):
@@ -348,7 +368,7 @@ def _scenario_records(gen: TransactionGenerator, scenario: str, persona, rng: ra
             recs.append(r)
         return recs
     if scenario == "shared_counterparty":
-        mule = make_iban(rng, rng.choice(["PS", "JO", "AE"]))
+        mule = rng.choice(gen.mule_accounts) if rng.random() < 0.5 else make_iban(rng, rng.choice(["PS", "JO", "AE"]))
         recs = []
         for other in rng.sample(gen.customers, 4):
             r = gen._base(other, at, "bank_transfer", round(rng.uniform(1500, 4800), 2), gen._home_ip(other),
@@ -441,8 +461,29 @@ class GatewaySimulator:
         self.cursor = start_utc
         self._last_ts: Optional[datetime] = None
         self._last_release = self.wall_start
+        self.queue: list[dict] = []
+
+    def _logins_for(self, record: dict) -> list[dict]:
+        """Digital-banking session events that precede a payment (account-takeover signals for fraud)."""
+        if record.get("channel") not in ("mobile_banking", "internet_banking") or self.rng.random() > \
+                (1.0 if record.get("scenario") in ("information_stealing", "salami_burst", "recharge_fraud") else 0.3):
+            return []
+        ts = datetime.fromisoformat(record["timestamp"])
+        country = (record.get("cc_asn") or "PS-").split("-")[0]
+        base = {"record_type": "login", "customer_id": record["user_id"], "channel": record["channel"],
+                "device_id": record.get("device") or "", "ip_address": record.get("ip"), "ip_country": country}
+        out = []
+        if record.get("scenario") in ("information_stealing", "salami_burst"):
+            for k in range(self.rng.randint(1, 3)):
+                out.append({**base, "event": "LOGIN_FAILED", "success": False,
+                            "timestamp": (ts - timedelta(minutes=12 - k)).isoformat(sep=" ", timespec="seconds")})
+        out.append({**base, "event": "LOGIN", "success": True,
+                    "timestamp": (ts - timedelta(minutes=self.rng.randint(1, 6))).isoformat(sep=" ", timespec="seconds")})
+        return out
 
     def _next(self) -> dict:
+        if self.queue:
+            return self.queue.pop(0)
         while True:
             record = next(self.stream)
             ts = local_to_utc(datetime.fromisoformat(str(record["timestamp"])), self.tz)
@@ -452,6 +493,10 @@ class GatewaySimulator:
             record["tx_id"] = f"GW-{self.rng.getrandbits(40):010X}"
             record.setdefault("channel", self.rng.choice(CHANNELS))
             record["gateway"] = "Payment gateway simulator"
+            logins = self._logins_for(record)
+            if logins:
+                self.queue = logins[1:] + [record]
+                return logins[0]
             return record
 
     MAX_GAP = timedelta(minutes=5)          # quiet periods (nights) are compressed during catch-up
@@ -508,7 +553,8 @@ def reset(db: Session, tenant_id: str, actor, reseed: bool = True) -> dict:
         for model in (CaseEntityLink, CaseEvent, CaseNote, EvidenceReference):
             db.execute(delete(model).where(model.case_id.in_(case_ids)))
     for model in (Case, Alert, ExecutionStatusEvent, Decision, Transaction, Customer, CustomerSegment, ModelVersion,
-                  DeadLetterEvent, ReportJob, Connector, ApiClient):
+                  DeadLetterEvent, ReportJob, Connector, ApiClient, ScreeningMatch, WatchlistEntry,
+                  CustomerConfirmation, StrReport, LoginEvent, CustomerReview, ReportSchedule):
         res = db.execute(delete(model).where(model.tenant_id == tenant_id, model.space == "DEMO"))
         counts[model.__tablename__] = res.rowcount
     db.commit()
@@ -541,7 +587,12 @@ def pump(db: Session, tenant_id: str, n: int, fraud_ratio: float = 0.03, mode: s
     sim = GatewaySimulator(tenant_id, fraud_ratio, speed=1e9, allow_future=not until_now)
     records = sim.due(n) if until_now else sim.take(n)
     done = 0
+    from .signals import record_login
     for record in records:
+        if record.get("record_type") == "login":
+            record_login(db, tenant_id, "DEMO", record)
+            db.commit()
+            continue
         try:
             evaluate(db, tenant_id, "DEMO", record, mode=mode, source=source, caller="gateway-simulator")
             done += 1

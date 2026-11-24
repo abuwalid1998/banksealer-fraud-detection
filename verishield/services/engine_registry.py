@@ -37,18 +37,22 @@ def to_engine(row: Transaction) -> ETx:
                currency=row.currency or "", iban=d.get("iban"), iban_cc=row.beneficiary_country, ip=row.ip,
                cc_asn=row.cc_asn, session_id=row.session_ref, card_id=d.get("card_id"),
                phone_number=d.get("phone_number"), operator=d.get("operator"), label=row.label,
-               scenario=row.scenario)
+               scenario=row.scenario, **{k: d.get(k) for k in EXTRA_FIELDS})
+
+
+EXTRA_FIELDS = ("merchant", "mcc", "merchant_cc", "entry_mode", "terminal", "location", "counterparty",
+                "counterparty_cc")
 
 
 def engine_tx_fields(tx: ETx) -> dict:
     """Columns of a DB Transaction derived from a prepared engine transaction."""
+    details = {"iban": tx.iban, "card_id": tx.card_id, "phone_number": tx.phone_number, "operator": tx.operator}
+    details.update({k: getattr(tx, k) for k in EXTRA_FIELDS if getattr(tx, k, None)})
     return {
         "customer_ref": tx.user_id, "ts": tx.timestamp, "tx_type": tx.tx_type, "amount": tx.amount,
-        "currency": tx.currency, "beneficiary": tx.beneficiary, "beneficiary_country": tx.iban_cc,
+        "currency": tx.currency, "beneficiary": tx.beneficiary, "beneficiary_country": tx.counterparty_country,
         "ip": tx.ip, "cc_asn": tx.cc_asn, "session_ref": tx.session_id, "label": tx.label,
-        "scenario": tx.scenario or None,
-        "details": {"iban": tx.iban, "card_id": tx.card_id, "phone_number": tx.phone_number,
-                    "operator": tx.operator},
+        "scenario": tx.scenario or None, "details": details,
     }
 
 

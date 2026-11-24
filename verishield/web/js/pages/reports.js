@@ -1,6 +1,6 @@
 // Report catalogue, generation and download; AML report wording for the Manager.
 import { api } from "../api.js";
-import { S, busy, card, chip, errToast, esc, fmtDate, fmtNum, label, loading, options, table, toast } from "../ui.js";
+import { S, busy, card, chip, errToast, esc, fmtDate, fmtNum, label, loading, modal, options, table, toast } from "../ui.js";
 
 const can = (p) => S.me.permissions.includes(p);
 const PARAM_LABEL = { tx_ref: "Transaction ID", customer_ref: "Customer reference", case_id: "Case ID" };
@@ -16,7 +16,7 @@ export async function render(el) {
       <div class="form-grid">
         <label class="f">From<input class="input" type="date" name="date_from" value="${from}"></label>
         <label class="f">To<input class="input" type="date" name="date_to" value="${to}"></label>
-        <label class="f">Product<select class="input" name="tx_type">${options(["bank_transfer", "phone_recharge", "prepaid_card"], "", { blank: "All" })}</select></label>
+        <label class="f">Product<select class="input" name="tx_type">${options(["bank_transfer", "phone_recharge", "prepaid_card", "card_payment", "cash_withdrawal", "cash_deposit", "incoming_transfer"], "", { blank: "All" })}</select></label>
         <label class="f">Risk level<select class="input" name="risk_level">${options(["LOW", "MEDIUM", "HIGH", "CRITICAL"], "", { blank: "All" })}</select></label>
         <label class="f">Format<select class="input" name="format">${options([["pdf", "PDF (branded)"], ["xlsx", "Excel (XLSX)"], ["csv", "CSV"]], "pdf")}</select></label>
       </div>
@@ -25,7 +25,8 @@ export async function render(el) {
     ${card("Available reports", `<ul style="margin:0;padding-left:18px" class="small">${cat.reports.map((r) => `<li>${esc(r.title)}</li>`).join("")}</ul>`)}
   </div>
   ${can("branding.reports") ? `<div style="margin-top:16px" id="brand">${loading()}</div>` : ""}
-  <div class="card" style="margin-top:16px" id="jobs">${loading()}</div>`;
+  <div class="card" style="margin-top:16px" id="jobs">${loading()}</div>
+  <div style="margin-top:16px" id="sched"></div>`;
   const form = el.querySelector("#gen");
   const drawParams = () => {
     const r = cat.reports.find((x) => x.id === form.type.value);
@@ -58,6 +59,32 @@ export async function render(el) {
     box.querySelectorAll("[data-dl]").forEach((b) => (b.onclick = () => api.download(`/reports/${encodeURIComponent(b.dataset.dl)}/download`).catch(errToast)));
   };
   loadJobs();
+  const loadSched = async () => {
+    const box = el.querySelector("#sched");
+    const d = await api.get("/report-schedules");
+    const plain = cat.reports.filter((r) => !(r.params || []).length);
+    box.innerHTML = card("Scheduled reports (e-mailed automatically)", table([
+      { label: "Report", render: (s) => esc((cat.reports.find((r) => r.id === s.report_type) || {}).title || s.report_type) },
+      { label: "Frequency", render: (s) => chip(s.frequency, "neutral") }, { label: "Format", render: (s) => s.fmt.toUpperCase() },
+      { label: "Recipients", render: (s) => `<span class="small">${esc(s.recipients.join(", "))}</span>` },
+      { label: "Next run", render: (s) => s.active ? fmtDate(s.next_run_at) : chip("PAUSED", "neutral") },
+      { label: "Last run", render: (s) => s.last_run_at ? `${fmtDate(s.last_run_at)}<div class="tiny muted">${esc(s.last_status)}</div>` : "–" },
+      { label: "", render: (s) => `<div class="row nowrap"><button class="btn sm" data-s="run" data-id="${s.id}">Run now</button><button class="btn sm" data-s="${s.active ? "pause" : "resume"}" data-id="${s.id}">${s.active ? "Pause" : "Resume"}</button><button class="btn sm danger" data-s="delete" data-id="${s.id}">Delete</button></div>` },
+    ], d.schedules, { empty: "No scheduled reports." }), { flush: true, actions: '<button class="btn sm primary" id="addsch">Schedule a report</button>',
+      sub: "Daily at 07:00, weekly on Saturdays, monthly on the 1st – sent through the bank's SMTP server (E-mail & SMS settings)" });
+    box.querySelector("#addsch").onclick = async () => {
+      const r = await modal({ title: "Schedule a report", body: `<div class="form-grid"><label class="f">Report<select class="input" name="rt">${options(plain.map((x) => [x.id, x.title]))}</select></label>
+        <label class="f">Frequency<select class="input" name="fq">${options([["DAILY", "Daily"], ["WEEKLY", "Weekly"], ["MONTHLY", "Monthly"]], "WEEKLY")}</select></label>
+        <label class="f">Format<select class="input" name="fm">${options([["pdf", "PDF"], ["xlsx", "Excel"], ["csv", "CSV"]], "pdf")}</select></label></div>
+        <label class="f" style="margin-top:10px">Recipients (e-mail, comma separated)<input class="input" name="to" value="${esc(S.me.user.email || "")}"></label>`,
+        actions: [{ label: "Cancel" }, { label: "Schedule", cls: "primary", onClick: (m) => api.post("/report-schedules", { report_type: m.querySelector("[name=rt]").value,
+          frequency: m.querySelector("[name=fq]").value, format: m.querySelector("[name=fm]").value, recipients: m.querySelector("[name=to]").value.split(",").map((x) => x.trim()).filter(Boolean) }) }] });
+      if (r) { toast("Report scheduled"); loadSched(); }
+    };
+    box.querySelectorAll("[data-s]").forEach((b) => (b.onclick = () => busy(b, async () => {
+      try { const r = await api.post(`/report-schedules/${b.dataset.id}/${b.dataset.s}`); if (b.dataset.s === "run") toast(r.last_status, "ok", 7000); loadSched(); loadJobs(); } catch (e) { errToast(e); } })));
+  };
+  loadSched().catch(errToast);
   if (can("branding.reports")) {
     const b = (await api.get("/branding")).branding;
     const box = el.querySelector("#brand");

@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import math
 import random
+import zlib
 import string
 import uuid
 from dataclasses import dataclass, field
@@ -87,6 +88,22 @@ PS_DEVICES = ["iPhone 15", "iPhone 13", "Samsung Galaxy S23", "Samsung Galaxy A5
               "Huawei P30", "Windows PC - Chrome", "Windows PC - Edge", "MacBook - Safari"]
 
 
+PS_MERCHANTS = [  # (name, MCC, typical amount ILS) - fictional local merchants
+    ("Al-Zaytouna Supermarket", "5411", 120), ("Bravo Market", "5411", 180), ("Shams Bakery", "5462", 25),
+    ("Al-Quds Pharmacy", "5912", 70), ("Petrol Station Al-Masyoun", "5541", 200), ("Paltel Shop", "4814", 90),
+    ("Ramallah Mall Fashion", "5651", 260), ("Abu Shukri Restaurant", "5812", 85), ("Cafe Jasmine", "5814", 30),
+    ("Al-Amal Electronics", "5732", 650), ("Home Center Nablus", "5200", 400), ("Bethlehem Bookshop", "5942", 60),
+    ("City Clinic", "8011", 150), ("Hebron Shoes", "5661", 220), ("Taxi Al-Nour", "4121", 35)]
+ECOM_MERCHANTS = [("Global Online Marketplace", "5399", "CN", 140), ("SkyFly Tickets", "4511", "JO", 1200),
+                  ("StreamBox Subscription", "4899", "US", 40), ("Istanbul Fashion Online", "5651", "TR", 300),
+                  ("Gulf Electronics Online", "5732", "AE", 900)]
+FRAUD_MERCHANTS = [("QuickGift Cards Ltd", "5999", "GB"), ("Crypto Exchange XT", "6051", "SC"),
+                   ("Lucky Bet Online", "7995", "MT"), ("Digital Goods 24", "5818", "CY")]
+ATM_PREFIX = {"Ramallah": "RAM", "Al-Bireh": "BIR", "Nablus": "NAB", "Hebron": "HEB", "Bethlehem": "BET",
+              "Jenin": "JEN", "Tulkarm": "TUL", "Qalqilya": "QAL", "Jericho": "JER", "Gaza": "GAZ",
+              "Khan Younis": "KHY", "Salfit": "SAL", "Tubas": "TUB"}
+
+
 def ps_iban(rng: random.Random, bank: Optional[str] = None) -> str:
     """Palestinian IBAN: PS + check digits + 4-letter bank code + 21 digits (29 characters)."""
     bban = (bank or rng.choice(PS_BANK_CODES)) + "".join(rng.choices(string.digits, k=21))
@@ -147,20 +164,37 @@ class Customer:
     channels: list = field(default_factory=list)
     devices: list = field(default_factory=list)
     weekend_day: int = 5                      # first weekend weekday (5 = Saturday, 4 = Friday)
+    card_rate: float = 0.0                    # card payments per day
+    favourite_merchants: list = field(default_factory=list)
+    ecom_share: float = 0.0
+    cash_out_rate: float = 0.0
+    cash_in_rate: float = 0.0
+    cash_in_mu: float = 0.0
+    salary: float = 0.0                       # monthly incoming salary (0 = none)
+    employer_iban: str = ""
+    remitter: tuple = ()                      # (iban, country, monthly amount)
+    clients: list = field(default_factory=list)   # business: paying customers' IBANs
+    receipts_rate: float = 0.0
 
     @property
     def daily_rate(self) -> float:
-        return self.transfer_rate + self.recharge_rate + self.prepaid_rate
+        return (self.transfer_rate + self.recharge_rate + self.prepaid_rate + self.card_rate + self.cash_out_rate
+                + self.cash_in_rate + self.receipts_rate)
 
 
 class TransactionGenerator:
     def __init__(self, n_customers: int = 150, banks: Optional[dict] = None, seed: Optional[int] = None,
                  fraud_ratio: float = 0.03, start: Optional[datetime] = None, currency: str = "EUR"):
         self.rng = random.Random(seed)
+        self.seed = seed
         self.currency = currency
         self.banks = banks or dict(DEFAULT_BANKS)
         self.fraud_ratio = fraud_ratio
         self.customers = [self._make_customer(i) for i in range(n_customers)]
+        # a small pool of mule accounts that fraudsters reuse – victims of different customers pay the same
+        # accounts, which is what network analysis finds (separate RNG keeps the customer stream unchanged)
+        mr = random.Random(f"mules-{seed}")
+        self.mule_accounts = [make_iban(mr, mr.choice(FRAUD_IBAN_COUNTRIES)) for _ in range(6)]
         self._seq = 0
         today = (start or datetime.now()).replace(hour=0, minute=0, second=0, microsecond=0)
         self.cursor = today   # next simulated day
@@ -239,7 +273,32 @@ class TransactionGenerator:
             prepaid_mu=rng.uniform(4.6, 6.0), hour_mean=hour_mean, hour_std=rng.uniform(1.3, 3.0),
             weekend_factor=0.15 if segment == "business" else 0.55, name=name, city=rng.choice(PS_CITIES),
             payee_names=payee_names, channels=[rng.choice(chans) for _ in range(3)],
-            devices=rng.sample(PS_DEVICES, k=rng.choice([1, 1, 2])), weekend_day=4)
+            devices=[f"{m} #{zlib.crc32(f'{self.seed}-{i}-{m}'.encode()):08X}"
+                     for m in rng.sample(PS_DEVICES, k=rng.choice([1, 1, 2]))], weekend_day=4,
+            **self._ps_extra(i, segment))
+
+    def _ps_extra(self, i: int, segment: str) -> dict:
+        """Card, cash and incoming-money habits (separate RNG keeps the original persona attributes stable)."""
+        r = random.Random(f"{self.seed}-extra-{i}")
+        business = segment == "business"
+        salaried = not business and r.random() < 0.7
+        out = {"card_rate": {"retail": r.uniform(0.3, 1.1), "affluent": r.uniform(0.8, 2.0),
+                             "business": r.uniform(0.1, 0.5)}[segment],
+               "favourite_merchants": r.sample(range(len(PS_MERCHANTS)), k=r.randint(4, 8)),
+               "ecom_share": r.uniform(0.0, 0.15) if segment != "business" else r.uniform(0.0, 0.3),
+               "cash_out_rate": r.uniform(0.08, 0.35) if not business else r.uniform(0.05, 0.2),
+               "cash_in_rate": r.uniform(0.15, 0.8) if business else (r.uniform(0.01, 0.05) if r.random() < 0.3 else 0),
+               "cash_in_mu": r.uniform(7.2, 8.3) if business else r.uniform(6.0, 7.2),
+               "salary": round(r.uniform(2800, 9000) if salaried and segment == "retail" else
+                               r.uniform(9000, 22000) if salaried else 0, -1),
+               "employer_iban": ps_iban(r) if salaried else ""}
+        if not business and r.random() < 0.25:
+            cc = r.choice(["JO", "AE", "SA", "QA", "US", "TR"])
+            out["remitter"] = (make_iban(r, cc), cc, round(r.uniform(500, 3000), -1))
+        if business:
+            out["clients"] = [ps_iban(r) for _ in range(r.randint(8, 30))]
+            out["receipts_rate"] = r.uniform(0.4, 2.0)
+        return out
 
     # -------------------------------------------------------------- helpers
     def _next_id(self) -> str:
@@ -310,10 +369,65 @@ class TransactionGenerator:
             tx["phone_number"] = rng.choices(c.phones, weights=[4] + [1] * (len(c.phones) - 1))[0]
             tx["operator"] = c.operator
             out.append(tx)
+        if c.city:
+            out.extend(self._ps_extra_day(c, day, factor))
         for _ in range(self._poisson(c.prepaid_rate * factor)):
             tx = self._base(c, self._time(day, c), "prepaid_card", min(rng.lognormvariate(c.prepaid_mu, 0.4), 900.0),
                             self._home_ip(c), None)
             tx["card_id"] = rng.choice(c.cards)
+            out.append(tx)
+        return out
+
+    def _ps_extra_day(self, c: Customer, day: datetime, factor: float) -> list[dict]:
+        rng = self.rng
+        out = []
+        for _ in range(self._poisson(c.card_rate * factor)):
+            if rng.random() < c.ecom_share:
+                name, mcc, cc, typical = rng.choice(ECOM_MERCHANTS)
+                mode = "ECOM"
+            else:
+                name, mcc, typical = PS_MERCHANTS[rng.choice(c.favourite_merchants)]
+                cc, mode = "PS", rng.choices(["CHIP", "CONTACTLESS"], weights=[45, 55])[0]
+            tx = self._base(c, self._time(day, c), "card_payment", max(3.0, rng.lognormvariate(math.log(typical), 0.5)),
+                            self._home_ip(c), None)
+            tx.update({"merchant": name, "mcc": mcc, "merchant_cc": cc, "entry_mode": mode,
+                       "channel": "card_ecom" if mode == "ECOM" else "card_pos",
+                       "device": rng.choice(c.devices) if mode == "ECOM" else "Card terminal",
+                       "amount": round(tx["amount"], 2)})
+            out.append(tx)
+        for _ in range(self._poisson(c.cash_out_rate * factor)):
+            city = c.city if rng.random() < 0.85 else rng.choice(PS_CITIES)
+            amount = float(rng.choice([100, 200, 200, 300, 500, 500, 700, 1000, 1500, 2000]))
+            tx = self._base(c, self._time(day, c), "cash_withdrawal", amount, self._home_ip(c), None)
+            tx.update({"terminal": f"ATM-{ATM_PREFIX.get(city, 'PS')}-{(zlib.crc32((c.user_id + city).encode()) % 20) + 1:03d}",
+                       "location": city, "channel": "atm", "device": "ATM / kiosk"})
+            out.append(tx)
+        for _ in range(self._poisson(c.cash_in_rate * factor)):
+            tx = self._base(c, day + timedelta(hours=rng.uniform(8.5, 14.5)), "cash_deposit",
+                            self._round_amount(min(rng.lognormvariate(c.cash_in_mu, 0.5), 45000.0)), self._home_ip(c),
+                            None)
+            tx.update({"terminal": f"BR-{ATM_PREFIX.get(c.city, 'PS')}-01", "location": c.city, "channel": "branch",
+                       "device": "Branch counter"})
+            out.append(tx)
+        if c.salary and day.day == 1 + (int(c.user_id[1:]) % 4):
+            tx = self._base(c, day + timedelta(hours=rng.uniform(7, 10)), "incoming_transfer",
+                            c.salary * rng.uniform(0.97, 1.03), self._home_ip(c), None)
+            tx.update({"counterparty": c.employer_iban, "counterparty_cc": "PS", "beneficiary_name": "Employer payroll",
+                       "purpose": "Salary", "channel": "core_banking", "device": "", "amount": round(tx["amount"], 2)})
+            out.append(tx)
+        if c.remitter and day.day == 10 + (int(c.user_id[1:]) % 10):
+            iban, cc, amount = c.remitter
+            tx = self._base(c, self._time(day, c), "incoming_transfer", amount * rng.uniform(0.9, 1.1),
+                            self._home_ip(c), None)
+            tx.update({"counterparty": iban, "counterparty_cc": cc, "beneficiary_name": "Family remittance",
+                       "purpose": "Family support", "channel": "swift_in", "device": "",
+                       "amount": self._round_amount(tx["amount"])})
+            out.append(tx)
+        for _ in range(self._poisson(c.receipts_rate * factor)):
+            tx = self._base(c, self._time(day, c), "incoming_transfer",
+                            min(rng.lognormvariate(c.amount_mu, c.amount_sigma), 40000.0), self._home_ip(c), None)
+            tx.update({"counterparty": rng.choice(c.clients), "counterparty_cc": "PS", "purpose": "Customer payment",
+                       "channel": "core_banking", "device": "", "amount": self._round_amount(tx["amount"])})
             out.append(tx)
         return out
 
@@ -339,22 +453,35 @@ class TransactionGenerator:
     # ------------------------------------------------------------- fraud
     SCENARIOS = ("information_stealing", "transaction_hijacking", "salami_burst", "recharge_fraud", "prepaid_drain")
     SCENARIO_WEIGHTS = (35, 20, 20, 13, 12)
+    PS_SCENARIOS = SCENARIOS + ("card_testing", "atm_cashout", "mule_passthrough", "cash_structuring")
+    PS_WEIGHTS = (24, 14, 14, 8, 6, 12, 8, 9, 5)
+
+    def _mule_iban(self, country: Optional[str] = None) -> str:
+        """Fraud payee: often one of the reused mule accounts, otherwise a fresh account."""
+        rng = self.rng
+        if rng.random() < 0.55:
+            return rng.choice(self.mule_accounts)
+        return make_iban(rng, country or rng.choice(FRAUD_IBAN_COUNTRIES))
 
     def make_fraud(self, c: Customer, ts: datetime, scenario: Optional[str] = None) -> list[dict]:
         rng = self.rng
-        scenario = scenario or rng.choices(self.SCENARIOS, weights=self.SCENARIO_WEIGHTS)[0]
+        if scenario is None:
+            scenario = rng.choices(self.PS_SCENARIOS, weights=self.PS_WEIGHTS)[0] if c.city else \
+                rng.choices(self.SCENARIOS, weights=self.SCENARIO_WEIGHTS)[0]
+        if scenario in ("card_testing", "atm_cashout", "mule_passthrough", "cash_structuring"):
+            return self._ps_fraud(c, ts, scenario)
         med = self._median_amount(c)
         out = []
         if scenario == "information_stealing":
             ts = ts.replace(hour=rng.randint(0, 23), minute=rng.randint(0, 59))
             tx = self._base(c, ts, "bank_transfer", min(med * rng.uniform(5, 20), 24000.0) + rng.uniform(500, 3000),
                             self._foreign_ip(), scenario)
-            tx["iban"] = make_iban(rng, rng.choice(FRAUD_IBAN_COUNTRIES))
+            tx["iban"] = self._mule_iban()
             out.append(tx)
         elif scenario == "transaction_hijacking":
             tx = self._base(c, ts, "bank_transfer", min(med * rng.uniform(3, 10), 14000.0) + rng.uniform(200, 1500),
                             self._home_ip(c), scenario)
-            tx["iban"] = make_iban(rng, c.home if rng.random() < 0.5 else rng.choice(FRAUD_IBAN_COUNTRIES))
+            tx["iban"] = make_iban(rng, c.home) if rng.random() < 0.5 else self._mule_iban()
             out.append(tx)
         elif scenario == "salami_burst":
             ip = self._foreign_ip() if rng.random() < 0.5 else self._home_ip(c)
@@ -386,6 +513,55 @@ class TransactionGenerator:
                         if tx["iban"].startswith("PS") else rng.choice(["Global Trade FZE", "M. Petrov", "Atlas Imports Ltd",
                                                                        "Nova Services SRL", "J. Smith", "Sunrise Holdings"])
                     tx["purpose"] = rng.choice(["Personal transfer", "Goods purchase", "Investment", "Family support"])
+        return out
+
+    def _ps_fraud(self, c: Customer, ts: datetime, scenario: str) -> list[dict]:
+        rng = self.rng
+        out = []
+        if scenario == "card_testing":          # stolen card details tested with tiny online payments, then cashed out
+            ip = self._foreign_ip()
+            name, mcc, cc = rng.choice(FRAUD_MERCHANTS)
+            for k in range(rng.randint(3, 6)):
+                amount = round(rng.uniform(1, 6), 2) if k < 3 else round(rng.uniform(600, 2500), 2)
+                tx = self._base(c, ts, "card_payment", amount, ip, scenario)
+                tx.update({"merchant": name, "mcc": mcc, "merchant_cc": cc, "entry_mode": "ECOM",
+                           "channel": "card_ecom", "device": "Unknown device"})
+                out.append(tx)
+                ts += timedelta(minutes=rng.randint(1, 6))
+        elif scenario == "atm_cashout":         # cloned card emptied at ATMs far from home, at night
+            ts = ts.replace(hour=rng.choice([0, 1, 2, 3, 23]))
+            for _ in range(rng.randint(3, 5)):
+                city = rng.choice([x for x in ATM_PREFIX if x != c.city])
+                tx = self._base(c, ts, "cash_withdrawal", 2000.0, self._home_ip(c), scenario)
+                tx.update({"terminal": f"ATM-{ATM_PREFIX[city]}-{rng.randint(30, 60):03d}", "location": city,
+                           "channel": "atm", "device": "ATM / kiosk"})
+                out.append(tx)
+                ts += timedelta(minutes=rng.randint(4, 15))
+        elif scenario == "mule_passthrough":    # account used as a mule: several unknown senders, money leaves abroad
+            total = 0.0
+            for _ in range(rng.randint(3, 5)):
+                amount = round(rng.uniform(1500, 4500), -1)
+                tx = self._base(c, ts, "incoming_transfer", amount, self._home_ip(c), scenario)
+                tx.update({"counterparty": ps_iban(rng), "counterparty_cc": "PS", "purpose": "Personal transfer",
+                           "channel": "core_banking", "device": ""})
+                out.append(tx)
+                total += amount
+                ts += timedelta(minutes=rng.randint(20, 120))
+            tx = self._base(c, ts + timedelta(hours=rng.uniform(1, 6)), "bank_transfer", round(total * 0.95, 2),
+                            self._foreign_ip() if rng.random() < 0.5 else self._home_ip(c), scenario)
+            tx["iban"] = self._mule_iban()
+            tx.update({"beneficiary_name": rng.choice(["Global Trade FZE", "Atlas Imports Ltd", "M. Petrov",
+                                                       "Nova Services SRL", "Sunrise Holdings"]),
+                       "purpose": "Investment"})
+            out.append(tx)
+        else:                                   # cash_structuring: several deposits just below 10,000
+            ts = ts.replace(hour=9)
+            for _ in range(rng.randint(3, 4)):
+                tx = self._base(c, ts, "cash_deposit", round(rng.uniform(8600, 9950), -1), self._home_ip(c), scenario)
+                tx.update({"terminal": f"BR-{ATM_PREFIX.get(c.city, 'PS')}-0{rng.randint(1, 3)}",
+                           "location": c.city, "channel": "branch", "device": "Branch counter"})
+                out.append(tx)
+                ts += timedelta(minutes=rng.randint(40, 120))
         return out
 
     # ------------------------------------------------------------ simulation

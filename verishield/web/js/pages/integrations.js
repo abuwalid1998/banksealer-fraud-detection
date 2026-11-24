@@ -11,10 +11,10 @@ export async function render(el) {
   let tab = "connectors";
   const draw = () => {
     const dbTab = can("tenant.manage") || can("connectors.manage");
-    el.innerHTML = `<div class="tabs"><button data-t="connectors" class="${tab === "connectors" ? "on" : ""}">Channels &amp; connectors</button>${dbTab ? `<button data-t="db" class="${tab === "db" ? "on" : ""}">Fraud engine database</button>` : ""}<button data-t="dlq" class="${tab === "dlq" ? "on" : ""}">Dead-letter queue</button><button data-t="push" class="${tab === "push" ? "on" : ""}">Push API</button></div><div id="tab">${loading()}</div>`;
+    el.innerHTML = `<div class="tabs"><button data-t="connectors" class="${tab === "connectors" ? "on" : ""}">Channels &amp; connectors</button>${dbTab ? `<button data-t="db" class="${tab === "db" ? "on" : ""}">Fraud engine database</button>` : ""}<button data-t="quality" class="${tab === "quality" ? "on" : ""}">Data quality</button><button data-t="dlq" class="${tab === "dlq" ? "on" : ""}">Dead-letter queue</button><button data-t="push" class="${tab === "push" ? "on" : ""}">Push API</button></div><div id="tab">${loading()}</div>`;
     el.querySelectorAll("[data-t]").forEach((b) => (b.onclick = () => { tab = b.dataset.t; draw(); }));
     const box = el.querySelector("#tab");
-    (tab === "connectors" ? connectors(box) : tab === "db" ? database(box) : tab === "dlq" ? deadLetters(box) : push(box)).catch(errToast);
+    (tab === "connectors" ? connectors(box) : tab === "db" ? database(box) : tab === "quality" ? quality(box) : tab === "dlq" ? deadLetters(box) : push(box)).catch(errToast);
     if (tab === "connectors") live(box, 5000, () => connectors(box));
   };
   draw();
@@ -276,3 +276,18 @@ async function push(box) {
     <tr><td class="mono small">GET /health · /ready · /metrics</td><td>–</td><td>Liveness, readiness and Prometheus metrics</td></tr></tbody></table>
     <p class="small" style="margin-top:12px">Create keys under <a href="#/settings">Users &amp; Settings › API clients</a>. Full contracts: <a href="/api/docs" target="_blank" rel="noopener">OpenAPI documentation</a>.</p>`);
 }
+
+async function quality(box) {
+  const d = await api.get("/connectors-quality?hours=24");
+  box.innerHTML = `<div class="grid g2">${d.channels.map((q) => card(q.name, `<div class="row" style="margin-bottom:10px">${chip(q.health, q.health === "OK" ? "ok" : "warn")} ${chip(q.status)}<span class="spacer"></span>
+      <span class="small muted">${q.rate_per_hour}/h${q.baseline_per_hour ? ` · usual ${q.baseline_per_hour}/h` : ""}</span></div>
+    ${q.issues.length ? `<div class="notice warn" style="margin-bottom:10px">${q.issues.map(esc).join("<br>")}</div>` : ""}
+    ${kv([["Received (24h)", fmtNum(q.received)], ["Accepted", fmtNum(q.accepted)], ["Rejected", fmtNum(q.rejected)], ["Duplicates", fmtNum(q.duplicates)],
+      ["Unknown types", fmtNum(q.unknown_types)], ["Median delivery delay", q.median_delay_min == null ? "–" : `${q.median_delay_min} min`]])}
+    <h4 style="margin:12px 0 6px">Missing fields</h4>${hbarsQ(Object.entries(q.missing_pct).map(([k, v]) => ({ label: label(k), value: v ?? 0, color: (v || 0) > 20 ? "#E8A33A" : "#0BAA9B" })))}
+    ${Object.keys(q.types).length ? `<h4 style="margin:12px 0 6px">Products</h4><div class="codes">${Object.entries(q.types).map(([k, v]) => `<span class="code">${esc(k)} ${v}</span>`).join("")}</div>` : ""}
+    ${q.top_rejections.length ? `<h4 style="margin:12px 0 6px">Top rejection reasons</h4><ul class="small">${q.top_rejections.map(([r, n]) => `<li>${esc(r)} (${n})</li>`).join("")}</ul>` : ""}`,
+    { sub: esc(q.type) })).join("") || empty("No inbound channels.")}</div>
+  <p class="tiny muted" style="margin-top:10px">Checked hourly: a drop below 30% of the usual volume, more than 5% rejected records, unknown transaction types or missing key fields raise an operations incident.</p>`;
+}
+function hbarsQ(items) { return items.length ? items.map((i) => `<div style="display:grid;grid-template-columns:130px 1fr 52px;gap:8px;align-items:center;font-size:12.5px;margin-bottom:4px"><span>${esc(i.label)}</span><div class="bar"><i style="width:${i.value}%;background:${i.color}"></i></div><b class="right">${i.value}%</b></div>`).join("") : ""; }

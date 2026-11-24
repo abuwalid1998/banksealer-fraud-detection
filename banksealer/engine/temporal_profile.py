@@ -101,7 +101,8 @@ class TemporalProfiler:
         items = [t for t in dq if t.tx_id != tx.tx_id] + ([tx] if include else [])
         home = self._home_country(tx.user_id)
         amounts = [t.amount for t in items]
-        foreign = sum(1 for t in items if t.tx_type == "bank_transfer" and t.iban_cc and home and t.iban_cc != home)
+        foreign = sum(1 for t in items if t.is_outflow and t.counterparty_country and home
+                      and t.counterparty_country != home)
         return np.array([
             len(items),
             float(sum(amounts)),

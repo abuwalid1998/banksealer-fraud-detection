@@ -9,12 +9,13 @@ export async function render(el) {
   const tabs = [];
   if (can("system.view")) tabs.push(["health", "Platform health"], ["incidents", "Incidents"]);
   if (can("audit.view")) tabs.push(["audit", "Audit trail"]);
+  if (can("tenant.manage")) tabs.push(["archive", "Archiving"]);
   let cur = tabs[0][0];
   const draw = () => {
     el.innerHTML = `<div class="tabs">${tabs.map(([k, l]) => `<button class="${k === cur ? "on" : ""}" data-t="${k}">${l}</button>`).join("")}</div><div id="tab">${loading()}</div>`;
     el.querySelectorAll("[data-t]").forEach((b) => (b.onclick = () => { cur = b.dataset.t; draw(); }));
     const box = el.querySelector("#tab");
-    ({ health, incidents, audit })[cur](box).catch(errToast);
+    ({ health, incidents, audit, archive })[cur](box).catch(errToast);
   };
   draw();
 }
@@ -90,4 +91,17 @@ async function audit(box) {
       box.querySelector("#vres").innerHTML = r.valid ? `${chip("CHAIN VALID", "ok")} ${fmtNum(r.checked)} events checked` : `${chip("TAMPERING DETECTED", "crit")} at event #${r.broken_at}`; } catch (err) { errToast(err); }
   });
   await load();
+}
+
+async function archive(box) {
+  const d = await api.get("/archive");
+  const p = d.preview;
+  box.innerHTML = `<div class="grid g2">${card("Archive old records", `${kv([["Retention (transactions)", `${fmtNum(p.retention_days)} days`], ["Cut-off", fmtDate(p.cutoff)],
+      ["Transactions to archive", fmtNum(p.transactions)], ["Decisions", fmtNum(p.decisions)], ["Closed alerts", fmtNum(p.alerts)], ["Kept for open cases", fmtNum(p.protected_by_open_cases)]])}
+      <p class="small" style="margin-top:10px">Records older than the retention period (Users & Settings › Institution) are written to a compressed archive file in the data folder and removed from the live database. Records linked to open cases are kept. The run is audited.</p>
+      <label class="f" style="margin-top:10px">Type ARCHIVE to confirm<input class="input mono" id="cf"></label><div class="row" style="margin-top:10px"><button class="btn primary" id="run" ${p.transactions || p.alerts ? "" : "disabled"}>Archive now</button></div>`)}
+    ${card("Archive files", table([{ label: "File", render: (f) => `<span class="mono small">${esc(f.file)}</span>` }, { label: "Workspace", render: (f) => chip(f.space, "neutral") },
+      { label: "Size", num: true, render: (f) => `${fmtNum(f.bytes / 1024, 0)} KB` }, { label: "Created", render: (f) => fmtDate(f.created) }], d.files, { empty: "No archives yet." }), { flush: true, sub: "Keep these files in the bank's backup / records system" })}</div>`;
+  const run = box.querySelector("#run");
+  run.onclick = () => busy(run, async () => { try { const r = await api.post("/archive/run", { confirm: box.querySelector("#cf").value }); toast(`${fmtNum(r.transactions)} transactions archived`); archive(box); } catch (e) { errToast(e); } });
 }

@@ -9,14 +9,14 @@ const can = (p) => S.me.permissions.includes(p);
 export async function render(el) {
   const tabs = [];
   if (can("users.manage")) tabs.push(["users", "Users"]);
-  if (can("tenant.manage")) tabs.push(["institution", "Institution & security"], ["branding", "Report branding"]);
+  if (can("tenant.manage")) tabs.push(["institution", "Institution & security"], ["directory", "Active Directory"], ["branding", "Report branding"]);
   if (can("api_clients.manage")) tabs.push(["api", "API clients"]);
   if (can("demo.manage")) tabs.push(["demo", "Demo Mode"]);
   let cur = tabs[0][0];
   const draw = () => {
     el.innerHTML = `<div class="tabs">${tabs.map(([k, l]) => `<button class="${k === cur ? "on" : ""}" data-t="${k}">${l}</button>`).join("")}</div><div id="tab">${loading()}</div>`;
     el.querySelectorAll("[data-t]").forEach((b) => (b.onclick = () => { cur = b.dataset.t; draw(); }));
-    ({ users, institution, branding, api: apiClients, demo })[cur](el.querySelector("#tab")).catch(errToast);
+    ({ users, institution, directory, branding, api: apiClients, demo })[cur](el.querySelector("#tab")).catch(errToast);
   };
   draw();
 }
@@ -35,12 +35,12 @@ async function users(box) {
     { label: "Name", render: (u) => esc(u.name) }, { label: "E-mail / mobile", render: (u) => `${esc(u.email)} ${u.email && !u.email_verified ? '<span class="tiny muted">(unverified)</span>' : ""}${u.phone ? `<div class="tiny muted">${esc(u.phone)}</div>` : ""}` },
     { label: "Role", render: (u) => `${esc(u.role_label)}${u.extra_permissions.length ? `<div class="tiny muted">+ ${esc(u.extra_permissions.join(", "))}</div>` : ""}` },
     { label: "Status", render: (u) => chip(u.status) + (u.must_change_password ? ' <span class="tiny muted">password change pending</span>' : "") },
-    { label: "MFA", render: (u) => u.mfa_enabled ? chip("ON", "ok") : chip("OFF", "neutral") },
+    { label: "Sign-in", render: (u) => u.auth_source === "AD" ? `${chip("DOMAIN", "info")}<div class="tiny muted">${esc(u.ad_account)}</div>` : (u.mfa_enabled ? chip("MFA ON", "ok") : chip("LOCAL", "neutral")) },
     { label: "Last sign-in", render: (u) => u.last_login_at ? fmtRel(u.last_login_at) : "never" },
     { label: "", render: (u) => `<div class="row nowrap"><button class="btn sm" data-edit="${u.id}">Edit</button><button class="btn sm" data-reset="${u.id}" title="Reset password">${icon("key")} Reset password</button>
       <select class="input" data-act="${u.id}" style="width:auto;padding:4px 6px;font-size:12px"><option value="">Actions…</option>
       ${u.status === "DISABLED" ? '<option value="enable">Enable</option>' : '<option value="disable">Disable</option>'}${u.status === "LOCKED" ? '<option value="unlock">Unlock</option>' : ""}
-      ${u.mfa_enabled ? '<option value="reset-mfa">Reset MFA</option>' : ""}</select></div>` },
+      <option value="directory">Domain sign-in…</option>${u.mfa_enabled ? '<option value="reset-mfa">Reset MFA</option>' : ""}</select></div>` },
   ], d.users), { flush: true, actions: '<button class="btn primary" id="add">Create user</button>',
     sub: "Usernames are identifiers, not security factors. Temporary passwords are single-use and expire." });
   box.querySelector("#add").onclick = async () => {
@@ -78,6 +78,14 @@ async function users(box) {
     const action = s.value; s.value = "";
     if (!action) return;
     const u = d.users.find((x) => x.id === s.dataset.act);
+    if (action === "directory") {
+      const r = await modal({ title: `Domain sign-in – ${u.username}`, body: `<p class="small muted" style="margin-bottom:10px">With domain sign-in the user enters the password of his Windows / Active Directory account; VeriShield never stores it.</p>
+        <label class="f">Sign-in method<select class="input" name="src">${options([["LOCAL", "VeriShield password"], ["AD", "Active Directory account"]], u.auth_source || "LOCAL")}</select></label>
+        <label class="f" style="margin-top:10px">Domain account (sAMAccountName)<input class="input mono" name="acc" value="${esc(u.ad_account || "")}" placeholder="e.g. a.mansour"></label>`,
+        actions: [{ label: "Cancel" }, { label: "Save", cls: "primary", onClick: (m) => api.post(`/users/${u.id}/directory`, { auth_source: m.querySelector("[name=src]").value, ad_account: m.querySelector("[name=acc]").value }) }] });
+      if (r) { toast("Saved"); users(box); }
+      return;
+    }
     if (!(await confirmDialog(`${label(action)} – ${u.username}`, `Apply “${label(action)}” to ${u.name}? This is audited.`, label(action), action === "disable" ? "danger" : "primary"))) return;
     try {
       const r = await api.post(`/users/${u.id}/${action}`);
@@ -197,6 +205,37 @@ async function branding(box) {
   const lf = box.querySelector("#lf");
   lf.onsubmit = (e) => { e.preventDefault(); const fd = new FormData(); fd.append("file", lf.file.files[0]);
     busy(lf.querySelector("button"), async () => { try { await api.upload("/branding/logo", fd); toast("Logo uploaded"); await refreshMe(); } catch (err) { errToast(err); } }); };
+}
+
+async function directory(box) {
+  const { config: c } = await api.get("/directory");
+  box.innerHTML = `<form id="df">${card("Sign-in with the bank's Active Directory", `
+    <div class="row" style="margin-bottom:12px">${toggle("enabled", c.enabled, "Domain sign-in ON")}<span class="spacer"></span>${c.ldap_installed ? chip("LDAP LIBRARY READY", "ok") : chip("ldap3 NOT INSTALLED", "crit")} <span class="small muted">${fmtNum(c.ad_users)} user(s) use domain sign-in</span></div>
+    <div class="form-grid">
+      <label class="f">Domain controller<span class="help">ldaps://dc01.bop.local:636 (recommended)</span><input class="input mono" name="server_url" value="${esc(c.server_url)}"></label>
+      <label class="f">Bind format<span class="help">{account} is replaced by the user's account</span><input class="input mono" name="bind_format" value="${esc(c.bind_format)}" placeholder="{account}@bop.local or BOP\\{account}"></label>
+      <label class="f">Base DN (for groups)<input class="input mono" name="base_dn" value="${esc(c.base_dn)}" placeholder="DC=bop,DC=local"></label>
+      <label class="f">User filter<input class="input mono" name="user_filter" value="${esc(c.user_filter)}"></label>
+      <label class="f">CA certificate file (optional)<input class="input mono" name="ca_file" value="${esc(c.ca_file)}" placeholder="C:\\ProgramData\\VeriShield\\certs\\bank-ca.pem"></label></div>
+    <div class="row" style="margin-top:12px;gap:22px">${toggle("use_starttls", c.use_starttls, "StartTLS on ldap://")}${toggle("verify_tls", c.verify_tls, "Verify the DC certificate")}
+      ${toggle("allow_local_fallback", c.allow_local_fallback, "Fall back to the VeriShield password if the DC is unreachable")}${toggle("sync_roles", c.sync_roles, "Role follows AD groups")}</div>
+    <label class="f" style="margin-top:12px">Group → role mapping (JSON)<textarea class="input mono" name="group_role_map" rows="3">${esc(JSON.stringify(c.group_role_map || {}, null, 1))}</textarea>
+      <span class="help">e.g. {"VS-AML-Managers": "AML_MANAGER", "VS-AML-Analysts": "AML_EMPLOYEE"}</span></label>
+    <p class="small muted" style="margin-top:10px">Link each user to his domain account in the Users tab (Actions › Domain sign-in). Domain users sign in with their VeriShield number or their domain account name; password rules, expiry and lock-out are those of the domain.</p>`,
+    { actions: '<button type="button" class="btn sm" id="test">Test sign-in</button><button class="btn sm primary">Save</button>' })}</form>`;
+  const f = box.querySelector("#df");
+  f.onsubmit = (e) => { e.preventDefault(); busy(f.querySelector("button.primary"), async () => {
+    try {
+      const v = {}; f.querySelectorAll("[name]").forEach((i) => (v[i.name] = i.type === "checkbox" ? i.checked : i.value));
+      v.group_role_map = JSON.parse(v.group_role_map || "{}");
+      await api.put("/directory", v); toast("Directory settings saved"); directory(box);
+    } catch (err) { errToast(err); } }); };
+  box.querySelector("#test").onclick = async () => {
+    const r = await modal({ title: "Test domain sign-in", body: `<p class="small muted">Save the settings first. The password is used once for the bind and not stored.</p>
+      <div class="form-grid" style="margin-top:10px"><label class="f">Domain account<input class="input" name="account"></label><label class="f">Password<input class="input" type="password" name="password"></label></div>`,
+      actions: [{ label: "Cancel" }, { label: "Test", cls: "primary", onClick: (m) => api.post("/directory/test", { account: m.querySelector("[name=account]").value, password: m.querySelector("[name=password]").value }) }] });
+    if (r) toast(r.ok ? `Authenticated${r.mapped_role ? ` – role ${r.mapped_role}` : ""}${r.groups ? ` – ${r.groups.length} group(s)` : ""}` : `Failed: ${r.message}`, r.ok ? "ok" : "error", 8000);
+  };
 }
 
 async function apiClients(box) {

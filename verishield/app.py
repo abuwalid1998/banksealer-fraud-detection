@@ -14,7 +14,8 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from . import __version__
-from .api import admin, auth, cases, core, governance, system
+from .api import admin, auth, cases, core, governance, intel, system
+from .models import Tenant
 from .services.metrics import metrics
 from .settings import settings
 
@@ -42,11 +43,20 @@ class _Jobs:
             try:
                 with SessionLocal() as db:
                     decision.expire_holds(db)
-                if time.time() - last_health > 1800:
-                    from .services import model_ops
-                    with SessionLocal() as db:
+                with SessionLocal() as db:
+                    from .services import cases as case_service
+                    from .services import confirmations, operations
+                    confirmations.expire(db)
+                    operations.run_due_schedules(db)
+                    if time.time() - last_health > 1800:
+                        from .services import model_ops
                         model_ops.check_all(db)
-                    last_health = time.time()
+                        case_service.escalate_due(db)
+                        operations.check_quality(db)
+                        for t in db.execute(__import__("sqlalchemy").select(Tenant)).scalars():
+                            operations.schedule_reviews(db, t.id, "LIVE")
+                            operations.schedule_reviews(db, t.id, "DEMO")
+                        last_health = time.time()
                 if time.time() - last_save > 300:
                     engine_registry.save_all()
                     last_save = time.time()
@@ -129,7 +139,7 @@ def create_app() -> FastAPI:
         return JSONResponse({"detail": {"code": "INTERNAL_ERROR", "message": "Unexpected error - see server log",
                                         "type": type(exc).__name__}}, 500)
 
-    for module in (auth, admin, core, cases, governance, system):
+    for module in (intel, auth, admin, core, cases, governance, system):
         app.include_router(module.router)
     app.include_router(admin.health_router)
     app.include_router(system.mcp_router)

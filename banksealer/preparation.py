@@ -41,6 +41,14 @@ FIELD_ALIASES: dict[str, tuple[str, ...]] = {
     "operator": ("operator", "carrier", "phone_operator"),
     "label": ("label", "is_fraud", "fraud"),
     "scenario": ("scenario", "fraud_scenario"),
+    "merchant": ("merchant", "merchant_id", "merchant_name", "acceptor"),
+    "mcc": ("mcc", "merchant_category", "merchant_category_code"),
+    "merchant_cc": ("merchant_cc", "merchant_country"),
+    "entry_mode": ("entry_mode", "pos_entry_mode", "card_entry_mode"),
+    "terminal": ("terminal", "terminal_id", "atm_id", "atm"),
+    "location": ("location", "terminal_location", "atm_location"),
+    "counterparty": ("counterparty", "originator", "originator_iban", "sender_iban", "remitter_iban", "from_iban"),
+    "counterparty_cc": ("counterparty_cc", "originator_country", "sender_country"),
 }
 TYPE_ALIASES = {
     "bank_transfer": "bank_transfer", "transfer": "bank_transfer", "wire": "bank_transfer",
@@ -51,6 +59,13 @@ TYPE_ALIASES = {
     "pr": "phone_recharge",
     "prepaid_card": "prepaid_card", "prepaid": "prepaid_card", "card_topup": "prepaid_card",
     "card_recharge": "prepaid_card", "prepaid_topup": "prepaid_card", "pc": "prepaid_card",
+    "card_payment": "card_payment", "pos": "card_payment", "purchase": "card_payment", "ecommerce": "card_payment",
+    "e_commerce": "card_payment", "card": "card_payment", "cp": "card_payment",
+    "cash_withdrawal": "cash_withdrawal", "atm_withdrawal": "cash_withdrawal", "withdrawal": "cash_withdrawal",
+    "atm": "cash_withdrawal", "cw": "cash_withdrawal",
+    "cash_deposit": "cash_deposit", "deposit": "cash_deposit", "cd": "cash_deposit",
+    "incoming_transfer": "incoming_transfer", "incoming": "incoming_transfer", "credit_transfer": "incoming_transfer",
+    "inward_transfer": "incoming_transfer", "received_transfer": "incoming_transfer", "it": "incoming_transfer",
 }
 TIME_FORMATS = (
     "%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M", "%d/%m/%Y %H:%M:%S",
@@ -207,6 +222,15 @@ class TransactionPreparer:
             iban_cc = iban[:2]
         if tx_type == "bank_transfer" and not iban:
             raise PreparationError("bank transfer without beneficiary IBAN")
+        merchant = _clean(data.get("merchant"))
+        if tx_type == "card_payment" and not merchant:
+            raise PreparationError("card payment without merchant")
+        counterparty = normalise_iban(data.get("counterparty"))
+        counterparty_cc = _clean(data.get("counterparty_cc"))
+        if counterparty and not counterparty_cc and re.match(r"^[A-Z]{2}\d{2}", counterparty):
+            counterparty_cc = counterparty[:2]
+        if tx_type == "incoming_transfer" and not counterparty:
+            raise PreparationError("incoming transfer without originator (counterparty)")
 
         cc_asn = _clean(data.get("cc_asn"))
         cc_asn = cc_asn.upper() if cc_asn else ("UNKNOWN" if _clean(data.get("ip")) is None else "XX-AS0")
@@ -242,4 +266,12 @@ class TransactionPreparer:
             operator=_clean(data.get("operator")),
             label=label,
             scenario=_clean(data.get("scenario")),
+            merchant=merchant,
+            mcc=_clean(data.get("mcc")),
+            merchant_cc=(_clean(data.get("merchant_cc")) or "").upper() or None,
+            entry_mode=(_clean(data.get("entry_mode")) or "").upper() or None,
+            terminal=_clean(data.get("terminal")),
+            location=_clean(data.get("location")),
+            counterparty=counterparty,
+            counterparty_cc=counterparty_cc.upper() if counterparty_cc else None,
         )

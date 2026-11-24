@@ -1,8 +1,9 @@
 // Customer list and Customer 360 profile (BRD 9.4).
 import { api } from "../api.js";
 import { navigate } from "../app.js";
-import { S, bindTable, busy, card, chip, decisionChip, errToast, esc, fmtDate, fmtMoney, fmtNum, fmtRel, fmtScore,
-  hbars, hourBars, kpi, kv, label, lineChart, live, liveBadge, loading, modal, options, pager, table, toast } from "../ui.js";
+import { S, bindTable, busy, card, chip, decisionChip, drawer, errToast, esc, fmtDate, fmtMoney, fmtNum, fmtRel, fmtScore,
+  hbars, hourBars, icon, kpi, kv, label, lineChart, live, liveBadge, loading, modal, networkGraph, options, pager, table,
+  toast } from "../ui.js";
 import { createCaseDialog, openTransaction } from "./transactions.js";
 
 const can = (p) => S.me.permissions.includes(p);
@@ -63,6 +64,9 @@ async function drawProfile(el, ref, setTitle, silent = false) {
   const actions = [];
   if (can("cases.create")) actions.push('<button class="btn" data-act="refer">Refer to analyst</button><button class="btn" data-act="alert">Manual alert</button>');
   if (can("reports.aml") || can("reports.executive") || can("reports.assigned")) actions.push('<button class="btn" data-act="pdf">Profile report</button>');
+  actions.unshift(`<button class="btn" data-act="timeline">Timeline</button>${can("customers.view_full") || can("customers.view_assigned") ? `<button class="btn" data-act="network">${icon("network")} Network</button>` : ""}`);
+  if (can("reviews.manage")) actions.push('<button class="btn" data-act="review">Start review</button>');
+  if (can("fraud.report")) actions.push('<button class="btn danger" data-act="fraud">Customer reports fraud</button>');
   el.innerHTML = `<div class="row" style="margin-bottom:14px"><a href="#/customers" class="btn sm ghost">← Customers</a><span class="spacer"></span>${actions.join("")}</div>
     ${d.limited_history ? `<div class="notice warn" style="margin-bottom:14px"><b>Limited history.</b> ${esc(d.monitoring_treatment)}</div>` : ""}
     <div class="kpis">
@@ -110,6 +114,11 @@ async function drawProfile(el, ref, setTitle, silent = false) {
     if (box) el.querySelectorAll("#txs tr[data-row]").forEach((tr) => tr.addEventListener("click", () => openTransaction(d.transactions[+tr.dataset.row].tx_ref)));
   }
   const act = (n) => el.querySelector(`[data-act=${n}]`);
+  if (act("timeline")) act("timeline").onclick = () => showTimeline(ref);
+  if (act("network")) act("network").onclick = () => showNetwork(ref);
+  if (act("review")) act("review").onclick = (e) => busy(e.currentTarget, async () => {
+    try { await api.post(`/customers/${encodeURIComponent(ref)}/review`, { days: 14 }); toast("Review opened – due in 14 days (Customer Reviews)"); } catch (err) { errToast(err); } });
+  if (act("fraud")) act("fraud").onclick = () => reportFraud({ customer_ref: ref });
   if (act("refer")) act("refer").onclick = async () => {
     const r = await createCaseDialog({ customer_refs: [ref], referral: true });
     if (r) navigate(`#/cases/${encodeURIComponent(r.id)}`);
@@ -125,4 +134,55 @@ async function drawProfile(el, ref, setTitle, silent = false) {
     try { const j = await api.post("/reports", { type: "customer_profile", format: "pdf", params: { customer_ref: ref } });
       await api.download(`/reports/${encodeURIComponent(j.id)}/download`); } catch (err) { errToast(err); }
   });
+}
+
+
+// ------------------------------------------------------------------ 360 timeline, network graph, fraud report
+const KIND_CHIP = { TRANSACTION: "info", ALERT: "warn", CASE: "crit", CASE_EVENT: "neutral", NOTE: "neutral", SCREENING: "crit", CONFIRMATION: "warn", LOGIN: "neutral", REVIEW: "info" };
+
+export async function showTimeline(ref) {
+  const dr = drawer(loading());
+  try {
+    const d = await api.get(`/customers/${encodeURIComponent(ref)}/timeline`);
+    let filter = "";
+    const draw = () => {
+      const ev = d.events.filter((e) => !filter || e.kind === filter);
+      const kinds = [...new Set(d.events.map((e) => e.kind))];
+      dr.set(`<div class="dh"><b>Customer 360 timeline – ${esc(ref)}</b><span class="spacer"></span><button class="x" data-close>×</button></div>
+        <div class="db"><div class="row"><button class="btn sm ${filter ? "" : "primary"}" data-f="">All (${d.events.length})</button>${kinds.map((k) => `<button class="btn sm ${filter === k ? "primary" : ""}" data-f="${k}">${esc(label(k))} (${d.events.filter((e) => e.kind === k).length})</button>`).join("")}</div>
+        <section class="card"><div class="bd"><ul class="timeline">${ev.map((e) => `<li><div>${chip(e.kind, KIND_CHIP[e.kind] || "neutral")} <b>${esc(e.title)}</b> ${e.status ? chip(e.status) : ""}${e.score != null ? ` <span class="tiny muted">score ${Number(e.score).toFixed(2)}</span>` : ""}</div>
+          ${e.detail ? `<div class="small">${esc(e.detail)}</div>` : ""}<div class="t">${fmtDate(e.at, { seconds: true })}${e.ref ? ` · <span class="mono">${esc(e.ref)}</span>` : ""}</div></li>`).join("") || "<li>No events.</li>"}</ul></div></section></div>`);
+      dr.el.querySelectorAll("[data-f]").forEach((b) => (b.onclick = () => { filter = b.dataset.f; draw(); }));
+    };
+    draw();
+  } catch (e) { errToast(e); dr.close(); }
+}
+
+export async function showNetwork(ref, days = 90) {
+  const dr = drawer(loading());
+  dr.el.style.width = "min(1100px, 100%)";
+  try {
+    const d = await api.get(`/customers/${encodeURIComponent(ref)}/network?days=${days}&hops=2`);
+    dr.set(`<div class="dh"><b>Linked accounts – ${esc(ref)}</b> <span class="small muted">last ${d.days} days · ${d.linked_customers} linked customer(s)</span><span class="spacer"></span>
+        <select class="input" id="days" style="width:auto">${options([[30, "30 days"], [90, "90 days"], [180, "180 days"], [365, "1 year"]], days)}</select><button class="x" data-close>×</button></div>
+      <div class="db">${networkGraph(d, { onNode: (n) => { if (n.kind === "customer" && n.label !== ref) { dr.close(); navigate(`#/customers/${encodeURIComponent(n.label)}`); } } })}
+        <p class="tiny muted">Customers are linked when they transfer money to the same account, use the same device or connect from the same IP address – the typical footprint of mule networks. Shops, ATMs, billers and values shared by more than 25 customers are left out. Click another customer to open it.</p>
+        ${card("Shared links", table([{ label: "Kind", render: (s) => chip(s.kind, "neutral") }, { label: "Value", render: (s) => `${s.label && s.label !== s.value ? `<b>${esc(s.label)}</b> ` : ""}<span class="mono small">${esc(s.value)}</span>${s.watched ? " " + chip("WATCH-LISTED", "crit") : ""}` },
+          { label: "Customers", num: true, key: "customers" }], d.shared, { empty: "No counterparty, device or IP is shared with other customers." }), { flush: true })}</div>`);
+    dr.el.querySelector("#days").onchange = (e) => { dr.close(); showNetwork(ref, Number(e.target.value)); };
+  } catch (e) { errToast(e); dr.close(); }
+}
+
+export async function reportFraud(pre = {}) {
+  const r = await modal({ title: "Customer reports fraud", body: `<p class="small muted" style="margin-bottom:10px">Branch or call centre: record what the customer reports. An URGENT case is opened and assigned, the transactions are labelled as fraud, their counterparties go on the watch list and payments still pending are rejected.</p>
+    <div class="form-grid"><label class="f">Customer<input class="input mono" name="customer_ref" value="${esc(pre.customer_ref || "")}"></label>
+    <label class="f">Transactions (comma separated)<input class="input mono" name="tx_refs" value="${esc((pre.tx_refs || []).join(", "))}"></label>
+    <label class="f">Reported via<select class="input" name="via">${options([["CALL_CENTRE", "Call centre"], ["BRANCH", "Branch"], ["MOBILE_APP", "Mobile app"], ["EMAIL", "E-mail"]], "CALL_CENTRE")}</select></label></div>
+    <label class="f" style="margin-top:10px">What happened<textarea class="input" name="description" placeholder="e.g. Customer says the transfer to … was not made by him; phone lost yesterday"></textarea></label>
+    <div class="row" style="margin-top:10px"><label class="check"><input type="checkbox" name="watchlist" checked> Add counterparties to the watch list</label><label class="check"><input type="checkbox" name="reject" checked> Reject pending payments</label></div>`,
+    actions: [{ label: "Cancel" }, { label: "Record fraud report", cls: "danger", onClick: (m) => api.post("/fraud-reports", {
+      customer_ref: m.querySelector("[name=customer_ref]").value.trim(), tx_refs: m.querySelector("[name=tx_refs]").value.split(",").map((x) => x.trim()).filter(Boolean),
+      reported_via: m.querySelector("[name=via]").value, description: m.querySelector("[name=description]").value,
+      watchlist: m.querySelector("[name=watchlist]").checked, reject_pending: m.querySelector("[name=reject]").checked }) }] });
+  if (r) { toast(`Case ${r.case_id} opened${r.watchlisted.length ? ` · ${r.watchlisted.length} counterparty(ies) watch-listed` : ""}`, "ok", 7000); navigate(`#/cases/${encodeURIComponent(r.case_id)}`); }
 }

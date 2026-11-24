@@ -14,7 +14,7 @@ export async function render(el, { params }) {
       <select class="input" name="decision">${options(["PASS", "REVIEW", "HOLD", "DECLINE", "ERROR_POLICY"], f.decision, { blank: "All decisions" })}</select>
       <select class="input" name="risk_level">${options(["LOW", "MEDIUM", "HIGH", "CRITICAL"], "", { blank: "All risk levels" })}</select>
       <select class="input" name="mode">${options([["PRE_AUTH", "Pre-authorisation"], ["POST_EVENT", "Post-event"]], "", { blank: "All timings" })}</select>
-      <select class="input" name="tx_type">${options(["bank_transfer", "phone_recharge", "prepaid_card"], "", { blank: "All products" })}</select>
+      <select class="input" name="tx_type">${options(["bank_transfer", "phone_recharge", "prepaid_card", "card_payment", "cash_withdrawal", "cash_deposit", "incoming_transfer"], "", { blank: "All products" })}</select>
       <select class="input" name="execution_state">${options(["PENDING", "HELD", "AUTHORISED", "DECLINED", "SETTLED", "EXPIRED", "RELEASE_REQUESTED", "DECLINE_REQUESTED", "RECALLED"], f.execution_state, { blank: "All execution states" })}</select>
       <input class="input" type="date" name="date_from" title="From"><input class="input" type="date" name="date_to" title="To">
       <label class="check"><input type="checkbox" id="livechk" checked> <span class="livepill" id="livebadge"><i></i>LIVE</span></label>
@@ -79,7 +79,8 @@ export async function openTransaction(ref, onChange) {
         ${card("Transaction", kv([["Customer", masked ? esc(t.customer_ref) : `<a href="#/customers/${encodeURIComponent(t.customer_ref)}">${esc(t.customer_ref)}</a>`],
           ["Time", fmtDate(t.ts, { seconds: true })], ["Product", esc(label(t.tx_type))], ["Amount", fmtMoney(t.amount, t.currency)],
           ["Channel", esc(label(t.channel))], ["Source", esc(t.source)], ["Beneficiary", `<span class="mono">${esc(t.beneficiary)}</span>${t.beneficiary_name ? `<div class="small">${esc(t.beneficiary_name)}</div>` : ""}`],
-          t.purpose ? ["Purpose", esc(t.purpose)] : null, t.city ? ["City", esc(t.city)] : null, t.device ? ["Device", esc(t.device)] : null,
+          t.purpose ? ["Purpose", esc(t.purpose)] : null, t.merchant ? ["Merchant", `${esc(t.merchant)} <span class="tiny muted">MCC ${esc(t.mcc || "–")} · ${esc(t.entry_mode || "")}</span>`] : null,
+          t.terminal ? ["Terminal", esc(t.terminal)] : null, t.city ? ["City", esc(t.city)] : null, t.device ? ["Device", esc(t.device)] : null,
           ["Beneficiary country", esc(t.beneficiary_country)], ["Connection", esc(t.connection)], ["IP", esc(t.ip)],
           t.scenario ? ["Synthetic scenario", chip(t.scenario, "neutral")] : null]))}
         ${dec ? card("Decision", `<div class="scorebars">${scoreBar(dec.local_score, "Local (customer)")}${scoreBar(dec.temporal_score, "Temporal (24h window)")}${scoreBar(dec.global_score, "Global (peer group)")}${scoreBar(dec.fraud_score, "Combined fraud score")}</div>

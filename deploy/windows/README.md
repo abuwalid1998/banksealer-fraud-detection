@@ -36,6 +36,11 @@ Behind a corporate proxy: `set HTTPS_PROXY=http://proxy.bank.local:8080` first. 
 PyPI mirror (Artifactory / Nexus): add `--index-url https://mirror/simple`. If python.org is blocked, download
 `python-3.12.10-amd64.exe` another way and add `--python-installer C:\path\python-3.12.10-amd64.exe`.
 
+Optional AI assistant (case summaries and STR narratives with Claude): add `--with-ai`. The bundle then also
+carries the Anthropic SDK and the installer installs it. It stays OFF until the IT Admin switches it on and stores
+an API key in *AI Agents › AI assistant*; without it VeriShield writes the narratives from the case facts itself.
+Active Directory sign-in (`ldap3`) is always included.
+
 ## Step 2 – copy to the server
 
 Copy the ZIP with the bank's approved method (secure file transfer, USB). Optionally verify it: the build

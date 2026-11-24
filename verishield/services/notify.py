@@ -93,7 +93,8 @@ def _secret(db: Session, tenant_id: str, ref: Optional[str]) -> str:
 
 
 # --------------------------------------------------------------------------- e-mail
-def _smtp_send(db: Session, tenant: Tenant, to: str, subject: str, text: str, html: Optional[str] = None) -> None:
+def _smtp_send(db: Session, tenant: Tenant, to: str, subject: str, text: str, html: Optional[str] = None,
+               attachments: Optional[list] = None) -> None:
     e = config(tenant)["email"]
     msg = EmailMessage()
     msg["From"] = formataddr((e.get("from_name") or tenant.display_name, e["from_address"]))
@@ -102,6 +103,11 @@ def _smtp_send(db: Session, tenant: Tenant, to: str, subject: str, text: str, ht
     msg.set_content(text)
     if html:
         msg.add_alternative(html, subtype="html")
+    for name, data in attachments or []:
+        kind = {"pdf": ("application", "pdf"), "csv": ("text", "csv"),
+                "xlsx": ("application", "vnd.openxmlformats-officedocument.spreadsheetml.sheet")}.get(
+            name.rsplit(".", 1)[-1], ("application", "octet-stream"))
+        msg.add_attachment(data, maintype=kind[0], subtype=kind[1], filename=name)
     ctx = ssl.create_default_context()
     if not e.get("verify_tls", True):
         ctx.check_hostname = False
@@ -135,7 +141,7 @@ def _html(tenant: Tenant, subject: str, text: str) -> str:
 
 
 def send_email(db: Session, tenant: Tenant, to: str, subject: str, text: str, event: str = "",
-               sensitive: bool = False) -> tuple[bool, str]:
+               sensitive: bool = False, attachments: Optional[list] = None) -> tuple[bool, str]:
     preview = "(contains a code or password - not stored)" if sensitive else text
     if not to:
         return False, "no e-mail address"
@@ -143,7 +149,7 @@ def send_email(db: Session, tenant: Tenant, to: str, subject: str, text: str, ev
         _record(db, tenant.id, "EMAIL", to, subject, preview, "DISABLED", "e-mail channel is off", event)
         return False, "e-mail channel is switched off or not configured"
     try:
-        _smtp_send(db, tenant, to, subject, text, _html(tenant, subject, text))
+        _smtp_send(db, tenant, to, subject, text, _html(tenant, subject, text), attachments)
         _record(db, tenant.id, "EMAIL", to, subject, preview, "SENT", event=event)
         return True, "sent"
     except Exception as exc:  # noqa: BLE001

@@ -5,12 +5,18 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from typing import Any, Optional
 
-TX_TYPES = ("bank_transfer", "phone_recharge", "prepaid_card")
+TX_TYPES = ("bank_transfer", "phone_recharge", "prepaid_card", "card_payment", "cash_withdrawal", "cash_deposit",
+            "incoming_transfer")
 TX_TYPE_LABELS = {
     "bank_transfer": "Bank transfer",
     "phone_recharge": "Phone recharge",
     "prepaid_card": "Prepaid card",
+    "card_payment": "Card payment (POS / e-commerce)",
+    "cash_withdrawal": "Cash withdrawal (ATM / branch)",
+    "cash_deposit": "Cash deposit",
+    "incoming_transfer": "Incoming transfer",
 }
+OUTFLOW_TYPES = ("bank_transfer", "phone_recharge", "prepaid_card", "card_payment", "cash_withdrawal")
 RISK_LEVELS = ("LOW", "MEDIUM", "HIGH", "CRITICAL")
 
 
@@ -36,6 +42,14 @@ class Transaction:
     operator: Optional[str] = None      # phone operator
     label: Optional[int] = None         # ground truth, if the source provides it
     scenario: Optional[str] = None      # fraud scenario name (mock data only)
+    merchant: Optional[str] = None      # card payments: merchant id / name
+    mcc: Optional[str] = None           # card payments: merchant category code
+    merchant_cc: Optional[str] = None   # card payments: merchant country
+    entry_mode: Optional[str] = None    # card payments: CHIP / CONTACTLESS / ECOM / MAGSTRIPE
+    terminal: Optional[str] = None      # cash: ATM or branch terminal id
+    location: Optional[str] = None      # cash: city / location of the terminal
+    counterparty: Optional[str] = None  # incoming transfers: originator IBAN
+    counterparty_cc: Optional[str] = None
 
     @property
     def hour(self) -> float:
@@ -43,11 +57,30 @@ class Transaction:
 
     @property
     def beneficiary(self) -> Optional[str]:
+        """The counterparty that identifies the operation (who receives / where it happens)."""
         if self.tx_type == "bank_transfer":
             return self.iban
         if self.tx_type == "phone_recharge":
             return self.phone_number
+        if self.tx_type == "card_payment":
+            return self.merchant
+        if self.tx_type in ("cash_withdrawal", "cash_deposit"):
+            return self.terminal
+        if self.tx_type == "incoming_transfer":
+            return self.counterparty
         return self.card_id
+
+    @property
+    def counterparty_country(self) -> Optional[str]:
+        if self.tx_type == "card_payment":
+            return self.merchant_cc
+        if self.tx_type == "incoming_transfer":
+            return self.counterparty_cc
+        return self.iban_cc
+
+    @property
+    def is_outflow(self) -> bool:
+        return self.tx_type in OUTFLOW_TYPES
 
     @property
     def ip_country(self) -> Optional[str]:

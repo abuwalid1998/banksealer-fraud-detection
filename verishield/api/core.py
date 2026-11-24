@@ -158,7 +158,10 @@ def tx_out(tx: Transaction, dec: Optional[Decision], masked: bool) -> dict:
          "reason_codes": dec.reason_codes if dec else [], "issued_at": iso(dec.issued_at) if dec else None,
          "scenario": tx.scenario if tx.space == "DEMO" else None, "label": tx.label if tx.space == "DEMO" else None,
          "beneficiary_name": (tx.details or {}).get("beneficiary_name"), "purpose": (tx.details or {}).get("purpose"),
-         "city": (tx.details or {}).get("city"), "device": tx.device_ref or (tx.details or {}).get("device")}
+         "city": (tx.details or {}).get("city") or (tx.details or {}).get("location"),
+         "device": tx.device_ref or (tx.details or {}).get("device"),
+         "merchant": (tx.details or {}).get("merchant"), "mcc": (tx.details or {}).get("mcc"),
+         "entry_mode": (tx.details or {}).get("entry_mode"), "terminal": (tx.details or {}).get("terminal")}
     if masked:
         d.update({"customer_ref": mask(tx.customer_ref, 2), "beneficiary": mask(tx.beneficiary), "ip": mask_ip(tx.ip),
                   "amount": None, "masked": True, "beneficiary_name": mask(d["beneficiary_name"]) if d["beneficiary_name"]

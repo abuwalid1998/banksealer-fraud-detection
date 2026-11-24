@@ -77,6 +77,8 @@ class User(Base):
     reset_by: Mapped[Optional[str]] = mapped_column(String(36), nullable=True)
     reset_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     phone: Mapped[str] = mapped_column(String(32), default="")              # mobile for SMS codes
+    auth_source: Mapped[str] = mapped_column(String(8), default="LOCAL")     # LOCAL | AD (Active Directory)
+    ad_account: Mapped[str] = mapped_column(String(120), default="")         # sAMAccountName / UPN
     reset_code_hash: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
     reset_code_expires_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     reset_attempts: Mapped[int] = mapped_column(Integer, default=0)
@@ -291,6 +293,10 @@ class Transaction(Base):
     execution_state: Mapped[str] = mapped_column(String(20), default="RECEIVED")
     decision_id: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+    @property
+    def is_outflow_row(self) -> bool:
+        return self.tx_type in ("bank_transfer", "phone_recharge", "prepaid_card", "card_payment", "cash_withdrawal")
 
 
 class Decision(Base):
@@ -563,3 +569,171 @@ class NotificationLog(Base):
     status: Mapped[str] = mapped_column(String(12), default="SENT")      # SENT FAILED DISABLED
     error: Mapped[str] = mapped_column(Text, default="")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)
+
+
+# --------------------------------------------------------------------------- 1.3: screening, watch list, ...
+class SanctionEntry(Base):
+    """One name on a sanctions / PEP / internal list (UN, OFAC, EU, local, PEP, internal)."""
+    __tablename__ = "sanction_entries"
+    __table_args__ = (Index("ix_sanction_list", "tenant_id", "list_code"),)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    tenant_id: Mapped[str] = mapped_column(String(16), index=True)
+    list_code: Mapped[str] = mapped_column(String(24))                    # UN OFAC EU LOCAL PEP INTERNAL
+    list_name: Mapped[str] = mapped_column(String(120), default="")
+    entry_ref: Mapped[str] = mapped_column(String(80), default="")
+    entity_type: Mapped[str] = mapped_column(String(16), default="INDIVIDUAL")   # INDIVIDUAL ENTITY VESSEL
+    name: Mapped[str] = mapped_column(String(300))
+    aliases: Mapped[list] = mapped_column(JSON, default=list)
+    norm_names: Mapped[list] = mapped_column(JSON, default=list)          # normalised name + aliases
+    country: Mapped[str] = mapped_column(String(64), default="")
+    birth_date: Mapped[str] = mapped_column(String(32), default="")
+    identifiers: Mapped[list] = mapped_column(JSON, default=list)         # IBANs, passports, ...
+    remarks: Mapped[str] = mapped_column(Text, default="")
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+    loaded_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
+class ScreeningMatch(Base):
+    __tablename__ = "screening_matches"
+    id: Mapped[str] = mapped_column(String(40), primary_key=True, default=lambda: new_id("SCR-"))
+    tenant_id: Mapped[str] = mapped_column(String(16), index=True)
+    space: Mapped[str] = mapped_column(String(8), default="LIVE")
+    subject_type: Mapped[str] = mapped_column(String(16))                 # CUSTOMER BENEFICIARY ORIGINATOR
+    subject_ref: Mapped[str] = mapped_column(String(120), index=True)
+    subject_name: Mapped[str] = mapped_column(String(300), default="")
+    customer_ref: Mapped[str] = mapped_column(String(64), default="", index=True)
+    tx_ref: Mapped[Optional[str]] = mapped_column(String(80), nullable=True)
+    entry_id: Mapped[int] = mapped_column(Integer)
+    list_code: Mapped[str] = mapped_column(String(24), default="")
+    matched_name: Mapped[str] = mapped_column(String(300), default="")
+    score: Mapped[float] = mapped_column(Float, default=0.0)
+    status: Mapped[str] = mapped_column(String(16), default="OPEN")       # OPEN TRUE_MATCH FALSE_POSITIVE
+    alert_id: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)
+    reviewed_by: Mapped[Optional[str]] = mapped_column(String(120), nullable=True)
+    reviewed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    note: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)
+
+
+class WatchlistEntry(Base):
+    """Beneficiary / device / originator known to be fraudulent: payments to it are held automatically."""
+    __tablename__ = "watchlist"
+    __table_args__ = (Index("ix_watchlist_value", "tenant_id", "space", "value"),)
+    id: Mapped[str] = mapped_column(String(40), primary_key=True, default=lambda: new_id("WL-"))
+    tenant_id: Mapped[str] = mapped_column(String(16))
+    space: Mapped[str] = mapped_column(String(8), default="LIVE")
+    kind: Mapped[str] = mapped_column(String(16))                         # IBAN PHONE CARD MERCHANT DEVICE IP NAME
+    value: Mapped[str] = mapped_column(String(200))
+    reason: Mapped[str] = mapped_column(Text, default="")
+    action: Mapped[str] = mapped_column(String(10), default="HOLD")
+    source: Mapped[str] = mapped_column(String(40), default="MANUAL")     # MANUAL CASE CUSTOMER_REPORT CONFIRMATION
+    source_ref: Mapped[str] = mapped_column(String(80), default="")
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+    hits: Mapped[int] = mapped_column(Integer, default=0)
+    last_hit_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    expires_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    created_by: Mapped[str] = mapped_column(String(120), default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
+class CustomerConfirmation(Base):
+    """SMS asking the customer to confirm a held payment (1 = yes, release / 2 = no, fraud)."""
+    __tablename__ = "customer_confirmations"
+    id: Mapped[str] = mapped_column(String(40), primary_key=True, default=lambda: new_id("CNF-"))
+    tenant_id: Mapped[str] = mapped_column(String(16), index=True)
+    space: Mapped[str] = mapped_column(String(8), default="LIVE")
+    tx_ref: Mapped[str] = mapped_column(String(80), index=True)
+    customer_ref: Mapped[str] = mapped_column(String(64))
+    phone: Mapped[str] = mapped_column(String(40), default="")
+    code: Mapped[str] = mapped_column(String(8), default="")
+    status: Mapped[str] = mapped_column(String(16), default="SENT")      # SENT NOT_SENT CONFIRMED DENIED EXPIRED
+    message: Mapped[str] = mapped_column(Text, default="")
+    reply: Mapped[str] = mapped_column(String(200), default="")
+    sent_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    answered_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    expires_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+
+
+class StrReport(Base):
+    """Suspicious transaction report prepared from a case for the Financial Follow-Up Unit."""
+    __tablename__ = "str_reports"
+    id: Mapped[str] = mapped_column(String(40), primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(String(16), index=True)
+    space: Mapped[str] = mapped_column(String(8), default="LIVE")
+    case_id: Mapped[str] = mapped_column(String(40), index=True)
+    status: Mapped[str] = mapped_column(String(16), default="DRAFT")     # DRAFT APPROVED SUBMITTED
+    report_code: Mapped[str] = mapped_column(String(8), default="STR")
+    reason: Mapped[str] = mapped_column(Text, default="")
+    narrative: Mapped[str] = mapped_column(Text, default="")
+    action_taken: Mapped[str] = mapped_column(Text, default="")
+    indicators: Mapped[list] = mapped_column(JSON, default=list)
+    transactions: Mapped[list] = mapped_column(JSON, default=list)
+    subjects: Mapped[list] = mapped_column(JSON, default=list)
+    prepared_by: Mapped[str] = mapped_column(String(120), default="")
+    approved_by: Mapped[Optional[str]] = mapped_column(String(120), nullable=True)
+    approved_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    submitted_ref: Mapped[str] = mapped_column(String(80), default="")
+    submitted_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
+class LoginEvent(Base):
+    """Digital-banking login / session event used for account-takeover risk."""
+    __tablename__ = "login_events"
+    __table_args__ = (Index("ix_login_customer_ts", "tenant_id", "space", "customer_ref", "ts"),)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    tenant_id: Mapped[str] = mapped_column(String(16))
+    space: Mapped[str] = mapped_column(String(8), default="LIVE")
+    customer_ref: Mapped[str] = mapped_column(String(64))
+    ts: Mapped[datetime] = mapped_column(DateTime)
+    event: Mapped[str] = mapped_column(String(24), default="LOGIN")       # LOGIN LOGIN_FAILED PASSWORD_RESET ...
+    channel: Mapped[str] = mapped_column(String(40), default="")
+    device_ref: Mapped[str] = mapped_column(String(120), default="")
+    ip: Mapped[str] = mapped_column(String(64), default="")
+    country: Mapped[str] = mapped_column(String(2), default="")
+    success: Mapped[bool] = mapped_column(Boolean, default=True)
+    risk_score: Mapped[float] = mapped_column(Float, default=0.0)
+    risk_factors: Mapped[list] = mapped_column(JSON, default=list)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
+class CustomerReview(Base):
+    """Periodic KYC / risk review of a customer (frequency by institution risk rating)."""
+    __tablename__ = "customer_reviews"
+    id: Mapped[str] = mapped_column(String(40), primary_key=True, default=lambda: new_id("REV-"))
+    tenant_id: Mapped[str] = mapped_column(String(16), index=True)
+    space: Mapped[str] = mapped_column(String(8), default="LIVE")
+    customer_ref: Mapped[str] = mapped_column(String(64), index=True)
+    reason: Mapped[str] = mapped_column(String(40), default="PERIODIC")   # PERIODIC TRIGGER MANUAL
+    risk_at_open: Mapped[str] = mapped_column(String(12), default="")
+    status: Mapped[str] = mapped_column(String(16), default="DUE")       # DUE IN_PROGRESS COMPLETED
+    due_at: Mapped[datetime] = mapped_column(DateTime)
+    assignee_id: Mapped[Optional[str]] = mapped_column(String(36), nullable=True)
+    checklist: Mapped[list] = mapped_column(JSON, default=list)
+    outcome: Mapped[str] = mapped_column(String(40), default="")
+    new_risk: Mapped[str] = mapped_column(String(12), default="")
+    notes: Mapped[str] = mapped_column(Text, default="")
+    completed_by: Mapped[Optional[str]] = mapped_column(String(120), nullable=True)
+    completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
+class ReportSchedule(Base):
+    __tablename__ = "report_schedules"
+    id: Mapped[str] = mapped_column(String(40), primary_key=True, default=lambda: new_id("SCH-"))
+    tenant_id: Mapped[str] = mapped_column(String(16), index=True)
+    space: Mapped[str] = mapped_column(String(8), default="LIVE")
+    report_type: Mapped[str] = mapped_column(String(40))
+    fmt: Mapped[str] = mapped_column(String(6), default="pdf")
+    frequency: Mapped[str] = mapped_column(String(10), default="WEEKLY")  # DAILY WEEKLY MONTHLY
+    recipients: Mapped[list] = mapped_column(JSON, default=list)
+    params: Mapped[dict] = mapped_column(JSON, default=dict)
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+    owner_id: Mapped[Optional[str]] = mapped_column(String(36), nullable=True)
+    owner_name: Mapped[str] = mapped_column(String(120), default="")
+    owner_role: Mapped[str] = mapped_column(String(20), default="")
+    next_run_at: Mapped[datetime] = mapped_column(DateTime)
+    last_run_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    last_status: Mapped[str] = mapped_column(String(200), default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)

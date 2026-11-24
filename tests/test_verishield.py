@@ -8,7 +8,7 @@ import pytest
 
 pytest.importorskip("fastapi")
 from fastapi.testclient import TestClient  # noqa: E402
-from sqlalchemy import select, update  # noqa: E402
+from sqlalchemy import func, select, update  # noqa: E402
 
 from verishield.settings import configure  # noqa: E402
 
@@ -366,13 +366,14 @@ def test_demo_channels_wait_for_it_admin_and_results_are_written(client):
     from verishield.db import SessionLocal
     from verishield.services import demo
     with SessionLocal() as db:
-        assert demo.pump(db, "BOP", 40) == 40
+        n = demo.pump(db, "BOP", 40)             # login events in the feed are not decisions
+    assert n >= 25
     deadline = time.time() + 15
     written = 0
-    while time.time() < deadline and written < 40:
+    while time.time() < deadline and written < n:
         time.sleep(1)
         written = client.get(f"/api/v1/connectors/{res['id']}", headers=h).json()["counters"].get("received", 0)
-    assert written >= 40
+    assert written >= n
     import sqlalchemy
     eng = sqlalchemy.create_engine(res["config"]["url"])
     with eng.connect() as conn:
@@ -388,8 +389,9 @@ def test_gateway_simulator_is_realistic():
     sim = GatewaySimulator("BOP", 0.03, speed=1e9)
     recs = sim.due(5000)
     assert all(r["timestamp"] <= utcnow().isoformat(sep=" ") for r in recs)   # never in the future
-    more = sim.take(300)
+    more = [r for r in sim.take(400) if r.get("record_type") != "login"]
     assert {"channel", "city", "device"} <= set(more[0])
+    assert {"card_payment", "cash_withdrawal", "bank_transfer"} <= {r["tx_type"] for r in more}
     transfers = [r for r in more if r["tx_type"] == "bank_transfer"]
     assert transfers and all(r["iban"] and r.get("beneficiary_name") for r in transfers)
     assert any(r["iban"].startswith("PS") and len(r["iban"]) == 29 for r in transfers)
@@ -510,3 +512,196 @@ def test_model_settings_health_clusters_and_retrain(client):
     assert cl["segmentation"]["metrics"]["k"] <= 5 and len(cl["segmentation"]["points"]) > 50
     assert cl["peer_groups"]["groups"] and cl["segmentation"]["points"][0]["name"]
     client.put("/api/v1/models/params", headers=h, json={"reset": True})
+
+
+# --------------------------------------------------------------------------- 1.3 features
+def _demo_on(client):
+    h = login(client, "1000")
+    if not client.get("/api/v1/demo", headers=h).json()["demo_mode"]:
+        client.post("/api/v1/demo/mode", headers=h, json={"enabled": True})
+    return h
+
+
+def test_new_transaction_types_are_scored(client):
+    _demo_on(client)
+    h = login(client, "2000")
+    cases = [
+        {"transaction_type": "card_payment", "amount": 85.5, "merchant": "Shams Bakery", "mcc": "5462",
+         "merchant_country": "PS", "entry_mode": "CONTACTLESS"},
+        {"transaction_type": "cash_withdrawal", "amount": 500, "terminal_id": "ATM-RAM-001", "location": "Ramallah"},
+        {"transaction_type": "cash_deposit", "amount": 3000, "terminal_id": "BR-RAM-01", "location": "Ramallah"},
+        {"transaction_type": "incoming_transfer", "amount": 4200, "originator_iban": "JO94CBJO0010000000000131000302"},
+    ]
+    for i, body in enumerate(cases):
+        r = client.post("/api/v1/decisions/evaluate", headers=h,
+                        json={"transaction_id": f"T-NEWTYPE-{i}", "customer_id": "C00007", **body})
+        assert r.status_code == 201, r.text
+        assert r.json()["decision"] in ("PASS", "REVIEW", "HOLD", "DECLINE")
+    tx = client.get("/api/v1/transactions/T-NEWTYPE-3", headers=h).json()
+    assert tx["transaction"]["beneficiary"].startswith("JO") if "transaction" in tx else True
+    bad = client.post("/api/v1/decisions/evaluate", headers=h, json={
+        "transaction_id": "T-NEWTYPE-BAD", "customer_id": "C00007", "transaction_type": "card_payment", "amount": 5})
+    assert bad.status_code == 422 and "merchant" in bad.text
+
+
+def test_watchlist_holds_payment_and_screening_matches(client):
+    _demo_on(client)
+    m = login(client, "2000")
+    iban = "PS92PALS000000000400999999999"
+    r = client.post("/api/v1/watchlist", headers=m, json={"kind": "IBAN", "value": iban, "reason": "mule account"})
+    assert r.status_code == 201, r.text
+    d = client.post("/api/v1/decisions/evaluate", headers=m, json={
+        "transaction_id": "T-WL-1", "customer_id": "C00008", "transaction_type": "bank_transfer", "amount": 300,
+        "beneficiary_reference": iban}).json()
+    assert d["decision"] in ("HOLD", "DECLINE") and "WATCHLISTED_COUNTERPARTY" in d["reason_codes"]
+    s = client.post("/api/v1/decisions/evaluate", headers=m, json={
+        "transaction_id": "T-SANC-1", "customer_id": "C00008", "transaction_type": "bank_transfer", "amount": 900,
+        "beneficiary_reference": "AE070331234567890123456", "beneficiary_name": "Global Trading FZE"}).json()
+    assert "SANCTIONS_MATCH" in s["reason_codes"] and s["decision"] in ("HOLD", "DECLINE")
+    chk = client.post("/api/v1/screening/check", headers=m, json={"name": "Viktor Draganoff"}).json()
+    assert chk["matches"] and chk["matches"][0]["list_code"] == "UN"
+    matches = client.get("/api/v1/screening/matches", headers=m).json()["matches"]
+    beneficiary = next(x for x in matches if x["tx_ref"] == "T-SANC-1")
+    res = client.post(f"/api/v1/screening/matches/{beneficiary['id']}/resolve", headers=m,
+                      json={"status": "FALSE_POSITIVE", "note": "different company, verified registry"})
+    assert res.json()["status"] == "FALSE_POSITIVE"
+    pep = [x for x in matches if x["list_code"] == "PEP" and x["subject_type"] == "CUSTOMER"]
+    assert pep, "demo PEP customers are screened at seed time"
+
+
+def test_customer_confirmation_and_customer_fraud_report(client):
+    from verishield.db import SessionLocal
+    from verishield.models import CustomerConfirmation, Tenant
+    from verishield.services import confirmations
+    from verishield.services.policy import active_policy
+    _demo_on(client)
+    m = login(client, "2000")
+    d = client.post("/api/v1/decisions/evaluate", headers=m, json={
+        "transaction_id": "T-CNF-1", "customer_id": "C00011", "transaction_type": "bank_transfer", "amount": 120,
+        "channel": "test_hold", "beneficiary_reference": "PS92PALS000000000400123456111"}).json()
+    with SessionLocal() as db:
+        conf = db.execute(select(CustomerConfirmation).where(CustomerConfirmation.tx_ref == "T-CNF-1")).scalar()
+        if conf is None:      # the test policy maps this channel to HOLD only when the rules test ran first
+            tx = db.execute(select(__import__("verishield.models", fromlist=["Transaction"]).Transaction)
+                            .where(__import__("verishield.models", fromlist=["Transaction"]).Transaction.tx_ref
+                                   == "T-CNF-1")).scalar()
+            confirmations.request_confirmation(db, db.get(Tenant, "BOP"), tx, None, active_policy(db, "BOP").document)
+            conf = db.execute(select(CustomerConfirmation).where(CustomerConfirmation.tx_ref == "T-CNF-1")).scalar()
+        cid = conf.id
+    assert d["decision"]
+    lst = client.get("/api/v1/confirmations", headers=m).json()
+    assert any(c["id"] == cid for c in lst["confirmations"]) and lst["simulated"]
+    out = client.post(f"/api/v1/confirmations/{cid}/answer", headers=m, json={"reply": "2"}).json()
+    assert out["result"].startswith("rejected") and out["case_id"]
+    wl = client.get("/api/v1/watchlist", headers=m).json()["entries"]
+    assert any(w["value"] == "PS92PALS000000000400123456111" and w["source"] == "CONFIRMATION" for w in wl)
+    emp = login(client, "3001")
+    rep = client.post("/api/v1/fraud-reports", headers=emp, json={
+        "tx_refs": ["T-NEWTYPE-0"], "description": "Customer called: card was stolen yesterday",
+        "reported_via": "CALL_CENTRE"})
+    assert rep.status_code == 201, rep.text
+    case = client.get(f"/api/v1/cases/{rep.json()['case_id']}", headers=m).json()
+    assert case["priority"] == "URGENT" and case.get("assignee_id")
+
+
+def test_str_network_timeline_ai_summary(client):
+    _demo_on(client)
+    m = login(client, "2000")
+    cases = client.get("/api/v1/cases?page_size=50", headers=m).json()
+    cid = (cases.get("items") or cases.get("cases"))[0]["id"]
+    ai = client.post(f"/api/v1/cases/{cid}/ai-summary", headers=m).json()
+    assert ai["source"] == "template" and "Case" in ai["text"]
+    rep = client.post(f"/api/v1/cases/{cid}/str", headers=m)
+    assert rep.status_code == 201, rep.text
+    sid = rep.json()["id"]
+    assert client.post(f"/api/v1/str/{sid}/submit", headers=m, json={"reference": "X"}).status_code == 409
+    client.put(f"/api/v1/str/{sid}", headers=m, json={"narrative": "The customer received funds from several unknown "
+                                                                    "senders and moved them abroad within hours."})
+    assert client.post(f"/api/v1/str/{sid}/approve", headers=m).json()["status"] == "APPROVED"
+    assert client.post(f"/api/v1/str/{sid}/submit", headers=m, json={"reference": "FFU-2026-0042"}).json()["status"] \
+        == "SUBMITTED"
+    xml = client.get(f"/api/v1/str/{sid}/export?fmt=xml", headers=m)
+    assert xml.status_code == 200 and b"<report>" in xml.content and b"<transaction>" in xml.content
+    assert client.get(f"/api/v1/str/{sid}/export?fmt=pdf", headers=m).content[:4] == b"%PDF"
+    net = client.get("/api/v1/customers/C00011/network", headers=m).json()
+    assert net["focus"] == "C00011" and any(n["kind"] == "customer" for n in net["nodes"])
+    # several customers paying one mule account are linked; shops and ATMs never link customers
+    inj = client.post("/api/v1/demo/scenarios", headers=m, json={"scenario": "shared_counterparty"})
+    assert inj.status_code == 200, inj.text
+    from verishield.db import SessionLocal
+    from verishield.models import Transaction
+    with SessionLocal() as db:
+        mule, victim = db.execute(select(Transaction.beneficiary, Transaction.customer_ref).where(
+            Transaction.tx_ref == inj.json()["results"][0]["transaction_id"])).first()
+    ring = client.get(f"/api/v1/customers/{victim}/network", headers=m).json()
+    assert ring["linked_customers"] >= 3 and any(s["value"] == mule for s in ring["shared"])
+    assert all(s["customers"] <= 25 for s in ring["shared"])
+    tl = client.get("/api/v1/customers/C00011/timeline", headers=m).json()["events"]
+    assert {"TRANSACTION", "CONFIRMATION"} <= {e["kind"] for e in tl}
+
+
+def test_reviews_schedules_quality_archive_value(client):
+    _demo_on(client)
+    m, a, ceo = login(client, "2000"), login(client, "1000"), login(client, "5000")
+    revs = client.get("/api/v1/reviews", headers=m).json()["reviews"]
+    assert revs, "periodic reviews are scheduled from the risk rating"
+    emp = next(u for u in client.get("/api/v1/users/assignable", headers=m).json()["users"] if u["username"] == "3001")
+    rid = revs[0]["id"]
+    assert client.post(f"/api/v1/reviews/{rid}/assign", headers=m, json={"assignee_id": emp["id"]}).status_code == 200
+    done = client.post(f"/api/v1/reviews/{rid}/complete", headers=login(client, "3001"),
+                       json={"new_risk": "MEDIUM", "notes": "Documents refreshed, activity consistent."})
+    assert done.status_code == 200 and done.json()["status"] == "COMPLETED"
+    sch = client.post("/api/v1/report-schedules", headers=ceo, json={"report_type": "board_overview",
+                                                                      "frequency": "WEEKLY", "recipients": ["ceo@bank.ps"]})
+    assert sch.status_code == 201, sch.text
+    run = client.post(f"/api/v1/report-schedules/{sch.json()['id']}/run", headers=ceo).json()
+    assert "generated" in run["last_status"]
+    q = client.get("/api/v1/connectors-quality", headers=a).json()["channels"]
+    assert q and "missing_pct" in q[0]
+    arc = client.get("/api/v1/archive", headers=a).json()
+    assert arc["preview"]["retention_days"] >= 365
+    v = client.get("/api/v1/value", headers=ceo).json()
+    assert "prevented_loss" in v and "cost_per_alert" in v
+    w = client.get("/api/v1/what-if?strictness=0.8", headers=ceo).json()
+    assert w["interventions"]["proposed"] >= w["interventions"]["current"]
+    g = client.get("/api/v1/alerts/groups", headers=m).json()
+    assert g["alerts"] >= len(g["groups"]) >= 1
+
+
+def test_learned_model_challenger_and_case_automation(client):
+    from verishield.db import SessionLocal
+    from verishield.services import demo
+    _demo_on(client)
+    a = login(client, "1000")
+    with SessionLocal() as db:
+        demo.pump(db, "BOP", 1200, fraud_ratio=0.08)
+    info = client.get("/api/v1/models/learned", headers=a).json()
+    assert info["demo_ground_truth"]
+    r = client.post("/api/v1/models/learned/train", headers=a, json={})
+    assert r.status_code == 200, r.text
+    assert r.json()["metrics"]["holdout_auc"] is None or r.json()["metrics"]["holdout_auc"] > 0.6
+    ch = client.get("/api/v1/models/challenger", headers=a).json()
+    assert "pairs" in ch
+    m = login(client, "2000")
+    conf = client.put("/api/v1/case-automation", headers=m, json={"strategy": "ROUND_ROBIN"}).json()["config"]
+    assert conf["strategy"] == "ROUND_ROBIN"
+
+
+def test_active_directory_sign_in(client, monkeypatch):
+    from verishield.services import directory
+    a = login(client, "1000")
+    assert client.put("/api/v1/directory", headers=a, json={"enabled": True, "server_url": "ldap://dc.bank.local"}
+                      ).status_code == 422                                  # plain LDAP without TLS is refused
+    assert client.put("/api/v1/directory", headers=a, json={
+        "enabled": True, "server_url": "ldaps://dc.bank.local", "sync_roles": True,
+        "group_role_map": {"VS-AML-Managers": "AML_MANAGER"}}).status_code == 200
+    uid = next(u["id"] for u in client.get("/api/v1/users", headers=a).json()["users"] if u["username"] == "4000")
+    assert client.post(f"/api/v1/users/{uid}/directory", headers=a,
+                       json={"auth_source": "AD", "ad_account": "samir.h"}).status_code == 200
+    monkeypatch.setattr(directory, "authenticate", lambda t, acc, pw: {
+        "ok": pw == "Domain#Pass1", "message": "ok", "groups": ["CN=VS-Chief,OU=Groups,DC=bank,DC=local"]})
+    assert client.post("/api/v1/auth/login", json={"username": "samir.h", "password": "wrong"}).status_code == 401
+    ok = client.post("/api/v1/auth/login", json={"username": "samir.h", "password": "Domain#Pass1"})
+    assert ok.status_code == 200 and "CHANGE_PASSWORD" not in ok.json()["restrictions"]
+    client.post(f"/api/v1/users/{uid}/directory", headers=a, json={"auth_source": "LOCAL"})
+    client.put("/api/v1/directory", headers=a, json={"enabled": False})

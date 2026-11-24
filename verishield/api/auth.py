@@ -27,7 +27,7 @@ log = logging.getLogger("verishield.auth")
 
 
 class LoginIn(BaseModel):
-    username: str = Field(..., min_length=1, max_length=10)
+    username: str = Field(..., min_length=1, max_length=120, description="VeriShield username or domain account")
     password: str = Field(..., min_length=1, max_length=200)
     tenant: Optional[str] = Field(None, description="Institution code (defaults to the installation's tenant)")
 
@@ -82,6 +82,10 @@ def login(body: LoginIn, request: Request, db: Session = Depends(get_db)):
     tenant = db.get(Tenant, tenant_id)
     user = db.execute(select(User).where(User.tenant_id == tenant_id, User.username == body.username.strip())
                       ).scalar() if tenant else None
+    if user is None and tenant is not None and body.username.strip():
+        from sqlalchemy import func as _f
+        user = db.execute(select(User).where(User.tenant_id == tenant_id, User.auth_source == "AD",
+                                             _f.lower(User.ad_account) == body.username.strip().lower())).scalar()
     fail = HTTPException(401, {"code": "INVALID_CREDENTIALS", "message": "Invalid username or password"})
     if user is None:
         if tenant:
@@ -93,7 +97,28 @@ def login(body: LoginIn, request: Request, db: Session = Depends(get_db)):
                      ip=ip)
         raise HTTPException(403, {"code": f"ACCOUNT_{user.status}",
                                   "message": f"Account is {user.status.lower()} - contact your IT Admin"})
-    if not verify_password(body.password, user.password_hash):
+    directory_ok = False
+    if user.auth_source == "AD" and user.ad_account:
+        from ..services import directory
+        res = directory.authenticate(tenant, user.ad_account, body.password)
+        directory_ok = bool(res.get("ok"))
+        if directory_ok:
+            if user.status == "INVITED":
+                user.status = "ACTIVE"
+            user.must_change_password = False
+            role = directory.role_from_groups(tenant, res.get("groups", [])) \
+                if directory.config(tenant).get("sync_roles") else None
+            if role and role != user.role:
+                audit.record(db, tenant_id, "user.role_sync", actor="directory", resource_type="user",
+                             resource_id=user.id, before={"role": user.role}, after={"role": role}, commit=False)
+                user.role = role
+        elif not (res.get("unavailable") and directory.config(tenant).get("allow_local_fallback")):
+            audit.record(db, tenant_id, "auth.login", actor=user, outcome="FAILURE",
+                         reason=f"directory: {res.get('message')}", ip=ip)
+            user.failed_logins += 1
+            db.commit()
+            raise fail
+    if not directory_ok and not verify_password(body.password, user.password_hash):
         sec = tenant.settings.get("security", {})
         user.failed_logins += 1
         if user.failed_logins >= int(sec.get("lockout_threshold", 5)):
@@ -101,7 +126,8 @@ def login(body: LoginIn, request: Request, db: Session = Depends(get_db)):
         db.commit()
         audit.record(db, tenant_id, "auth.login", actor=user, outcome="FAILURE", reason="bad password", ip=ip)
         raise fail
-    if user.must_change_password and user.temp_password_expires_at and user.temp_password_expires_at < utcnow():
+    if not directory_ok and user.must_change_password and user.temp_password_expires_at and \
+            user.temp_password_expires_at < utcnow():
         audit.record(db, tenant_id, "auth.login", actor=user, outcome="FAILURE", reason="temporary password expired",
                      ip=ip)
         raise HTTPException(403, {"code": "TEMP_PASSWORD_EXPIRED",
@@ -310,6 +336,10 @@ def forgot_password(body: ForgotIn, request: Request, db: Session = Depends(get_
                      reason="unknown or disabled account", ip=ip)
         return generic
     if not rate_limiter.allow(f"forgot-user:{user.id}", 3, 600):
+        return generic
+    if user.auth_source == "AD":
+        audit.record(db, tenant.id, "auth.forgot_password", actor=user, outcome="FAILURE", ip=ip,
+                     reason="directory account - password is managed by the domain")
         return generic
     code = f"{secrets.randbelow(900000) + 100000}"
     user.reset_code_hash = _reset_hash(user, code)

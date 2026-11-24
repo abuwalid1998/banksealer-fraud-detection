@@ -50,7 +50,9 @@ async function editor(el, id, list, setTitle) {
     <td><input type="checkbox" data-k="enabled" ${r.enabled ? "checked" : ""} ${dis}></td>
     <td><input class="input" data-k="id" value="${esc(r.id)}" ${dis} style="min-width:110px"></td>
     <td><input class="input" data-k="name" value="${esc(r.name)}" ${dis} style="min-width:200px"></td>
-    <td><textarea class="input mono" data-k="conditions" ${dis} style="min-width:280px;min-height:54px">${esc(JSON.stringify(r.conditions))}</textarea></td>
+    <td><div class="small" data-k="summary" style="min-width:240px">${esc(ruleSummary(r.conditions))}</div>
+      <textarea class="input mono hidden" data-k="conditions" ${dis}>${esc(JSON.stringify(r.conditions))}</textarea>
+      <div class="row" style="margin-top:4px">${editable ? '<button type="button" class="btn sm" data-build>Edit conditions</button>' : ""}<button type="button" class="btn sm ghost" data-json>JSON</button></div></td>
     <td><select class="input" data-k="action" ${dis}>${options(OUT, r.action)}</select></td>
     <td><input class="input mono" data-k="reason_code" value="${esc(r.reason_code || "")}" ${dis}></td>
     <td>${editable ? '<button class="btn sm danger" data-del>Remove</button>' : ""}</td></tr>`;
@@ -99,7 +101,7 @@ async function editor(el, id, list, setTitle) {
         <label class="f">ELEVATED signal →<select class="input" name="aml.elevated_action" ${dis}>${options(OUT, aml.elevated_action)}</select></label>
         <label class="f">HIGH signal →<select class="input" name="aml.high_action" ${dis}>${options(OUT, aml.high_action)}</select></label>
       </div>`)}
-      ${card("Business rules (scoped)", `<div class="tbl-wrap"><table class="tbl"><thead><tr><th>On</th><th>ID</th><th>Name</th><th>Conditions (JSON)</th><th>Action</th><th>Reason code</th><th></th></tr></thead><tbody id="rules">${doc.rules.map(ruleRow).join("")}</tbody></table></div>
+      ${card("Business rules (scoped)", `<div class="tbl-wrap"><table class="tbl"><thead><tr><th>On</th><th>ID</th><th>Name</th><th>Conditions</th><th>Action</th><th>Reason code</th><th></th></tr></thead><tbody id="rules">${doc.rules.map(ruleRow).join("")}</tbody></table></div>
         ${editable ? '<button type="button" class="btn sm" id="addrule" style="margin-top:10px">Add rule</button>' : ""}
         <p class="tiny muted" style="margin-top:8px">Condition keys: ${list.condition_keys.map((k) => `<span class="code">${esc(k)}</span>`).join(" ")} – e.g. <span class="code">{"tx_types":["bank_transfer"],"channels":["mobile_banking"],"min_amount":5000,"segments":[2],"customer_risk":["HIGH"],"new_beneficiary":true,"velocity_count":5,"velocity_hours":1}</span></p>`)}
       ${card("Fallback when no reliable decision can be produced (ERROR_POLICY)", `<div class="form-grid">${Object.entries(doc.fallback).map(([k, v]) => `<label class="f">${esc(label(k))}<select class="input" name="fallback.${k}" ${dis}>${options(list.fallbacks.map((f) => [f, label(f)]), v)}</select></label>`).join("")}</div>
@@ -128,7 +130,18 @@ async function editor(el, id, list, setTitle) {
     });
     return { document: out, name: f.name.value, justification: f.justification.value, effective_from: f.effective_from.value || null };
   };
-  const bindRules = () => el.querySelectorAll("[data-del]").forEach((b) => (b.onclick = () => b.closest("tr").remove()));
+  const bindRules = () => {
+    el.querySelectorAll("[data-del]").forEach((b) => (b.onclick = () => b.closest("tr").remove()));
+    el.querySelectorAll("[data-json]").forEach((b) => (b.onclick = () => b.closest("td").querySelector("[data-k=conditions]").classList.toggle("hidden")));
+    el.querySelectorAll("[data-build]").forEach((b) => (b.onclick = async () => {
+      const td = b.closest("td");
+      const ta = td.querySelector("[data-k=conditions]");
+      let cond = {};
+      try { cond = JSON.parse(ta.value || "{}"); } catch { /* start empty */ }
+      const res = await ruleBuilder(cond);
+      if (res) { ta.value = JSON.stringify(res); td.querySelector("[data-k=summary]").textContent = ruleSummary(res); }
+    }));
+  };
   bindRules();
   const add = el.querySelector("#addrule");
   if (add) add.onclick = () => { el.querySelector("#rules").insertAdjacentHTML("beforeend", ruleRow({ id: `R-${Date.now().toString(36).toUpperCase()}`, name: "New rule", enabled: true, conditions: { tx_types: ["bank_transfer"], min_amount: 5000 }, action: "REVIEW", reason_code: "" }, el.querySelectorAll("#rules tr").length)); bindRules(); };
@@ -165,6 +178,74 @@ async function editor(el, id, list, setTitle) {
       actions: [{ label: "Cancel" }, { label: "Roll back now", cls: "danger", onClick: (m) => api.post(`/policies/${encodeURIComponent(p.id)}/rollback`, { justification: m.querySelector("[name=j]").value }) }] });
     if (r) { toast(`Rolled back – new version ${r.id} active`); location.hash = "#/policies"; }
   });
+}
+
+// ------------------------------------------------------------------ visual rule builder
+const TX_TYPES = ["bank_transfer", "phone_recharge", "prepaid_card", "card_payment", "cash_withdrawal", "cash_deposit", "incoming_transfer"];
+const CHANNELS = ["mobile_banking", "internet_banking", "branch", "atm", "atm_kiosk", "card_pos", "card_ecom", "core_banking", "swift_in"];
+
+export function ruleSummary(c) {
+  const parts = [];
+  if (c.tx_types && c.tx_types.length) parts.push(c.tx_types.map(label).join(" / "));
+  if (c.channels && c.channels.length) parts.push(`via ${c.channels.map(label).join(", ")}`);
+  if (c.min_amount != null) parts.push(`amount ≥ ${c.min_amount}`);
+  if (c.max_amount != null) parts.push(`amount ≤ ${c.max_amount}`);
+  if (c.new_beneficiary != null) parts.push(c.new_beneficiary ? "new counterparty" : "known counterparty");
+  if (c.countries && c.countries.length) parts.push(`countries ${c.countries.join(", ")}`);
+  if (c.customer_risk && c.customer_risk.length) parts.push(`customer risk ${c.customer_risk.join("/")}`);
+  if (c.customer_types && c.customer_types.length) parts.push(c.customer_types.map(label).join("/"));
+  if (c.hours && c.hours.length) parts.push(`hours ${c.hours.join(",")}`);
+  if (c.velocity_count) parts.push(`≥ ${c.velocity_count} in ${c.velocity_hours || 24}h`);
+  if (c.entry_modes && c.entry_modes.length) parts.push(`entry ${c.entry_modes.join("/")}`);
+  if (c.mccs && c.mccs.length) parts.push(`MCC ${c.mccs.join(",")}`);
+  if (c.min_fraud_score != null) parts.push(`score ≥ ${c.min_fraud_score}`);
+  if (c.aml_levels && c.aml_levels.length) parts.push(`AML ${c.aml_levels.join("/")}`);
+  if (c.modes && c.modes.length) parts.push(c.modes.map(label).join("/"));
+  return parts.length ? `When ${parts.join(" · ")}` : "Always (no conditions)";
+}
+
+function ruleBuilder(c) {
+  const multi = (name, list, sel = []) => `<div class="row" style="gap:6px 12px">${list.map((v) => `<label class="check"><input type="checkbox" data-m="${name}" value="${esc(v)}" ${sel.includes(v) ? "checked" : ""}> ${esc(label(v))}</label>`).join("")}</div>`;
+  const num = (name, v, ph = "") => `<input class="input" type="number" step="any" name="${name}" value="${v ?? ""}" placeholder="${ph}">`;
+  return modal({ title: "Rule conditions", wide: true, body: `<p class="small muted" style="margin-bottom:12px">All the conditions you fill must be true for the rule to act. Empty fields are ignored. Test the result with <b>Simulate impact</b> before publishing.</p>
+    <div class="stack" style="gap:14px">
+      <div><h4 style="margin-bottom:6px">Transaction types</h4>${multi("tx_types", TX_TYPES, c.tx_types || [])}</div>
+      <div><h4 style="margin-bottom:6px">Channels</h4>${multi("channels", CHANNELS, c.channels || [])}</div>
+      <div class="form-grid">
+        <label class="f">Minimum amount${num("min_amount", c.min_amount)}</label><label class="f">Maximum amount${num("max_amount", c.max_amount)}</label>
+        <label class="f">Counterparty<select class="input" name="new_beneficiary">${options([["", "Any"], ["true", "New (never used by the customer)"], ["false", "Known"]], c.new_beneficiary == null ? "" : String(c.new_beneficiary))}</select></label>
+        <label class="f">Countries (counterparty or connection)<input class="input" name="countries" value="${esc((c.countries || []).join(", "))}" placeholder="e.g. KY, PA, RU"></label>
+        <label class="f">At least N operations…${num("velocity_count", c.velocity_count, "e.g. 5")}</label><label class="f">…within hours${num("velocity_hours", c.velocity_hours, "24")}</label>
+        <label class="f">Hours of day<input class="input" name="hours" value="${esc((c.hours || []).join(", "))}" placeholder="e.g. 0, 1, 2, 3"></label>
+        <label class="f">Merchant category codes (MCC)<input class="input" name="mccs" value="${esc((c.mccs || []).join(", "))}" placeholder="e.g. 6051, 7995"></label>
+        <label class="f">Minimum fraud score (0–1)${num("min_fraud_score", c.min_fraud_score)}</label>
+      </div>
+      <div class="grid g3">
+        <div><h4 style="margin-bottom:6px">Customer risk</h4>${multi("customer_risk", ["LOW", "MEDIUM", "HIGH"], c.customer_risk || [])}</div>
+        <div><h4 style="margin-bottom:6px">Customer type</h4>${multi("customer_types", ["INDIVIDUAL", "BUSINESS"], c.customer_types || [])}</div>
+        <div><h4 style="margin-bottom:6px">Card entry mode</h4>${multi("entry_modes", ["ECOM", "CHIP", "CONTACTLESS", "MAGSTRIPE"], c.entry_modes || [])}</div>
+        <div><h4 style="margin-bottom:6px">AML signal</h4>${multi("aml_levels", ["LOW", "ELEVATED", "HIGH"], c.aml_levels || [])}</div>
+        <div><h4 style="margin-bottom:6px">Mode</h4>${multi("modes", ["PRE_AUTH", "POST_EVENT"], c.modes || [])}</div>
+      </div>
+      <p class="small" id="rsum" style="font-weight:600"></p></div>`,
+    onOpen: (m) => {
+      const upd = () => { m.querySelector("#rsum").textContent = ruleSummary(read(m)); };
+      m.querySelectorAll("input,select").forEach((i) => i.addEventListener("input", upd)); upd();
+    },
+    actions: [{ label: "Cancel" }, { label: "Apply", cls: "primary", onClick: (m) => read(m) }] });
+  function read(m) {
+    const out = {};
+    ["tx_types", "channels", "customer_risk", "customer_types", "entry_modes", "aml_levels", "modes"].forEach((k) => {
+      const v = [...m.querySelectorAll(`[data-m=${k}]:checked`)].map((x) => x.value); if (v.length) out[k] = v; });
+    ["min_amount", "max_amount", "velocity_count", "velocity_hours", "min_fraud_score"].forEach((k) => {
+      const v = m.querySelector(`[name=${k}]`).value; if (v !== "") out[k] = Number(v); });
+    const nb = m.querySelector("[name=new_beneficiary]").value; if (nb) out.new_beneficiary = nb === "true";
+    const list = (k, f = (x) => x) => m.querySelector(`[name=${k}]`).value.split(",").map((x) => x.trim()).filter(Boolean).map(f);
+    if (list("countries").length) out.countries = list("countries", (x) => x.toUpperCase());
+    if (list("hours").length) out.hours = list("hours", (x) => parseInt(x, 10)).filter((x) => !isNaN(x));
+    if (list("mccs").length) out.mccs = list("mccs");
+    return out;
+  }
 }
 
 export { loading };

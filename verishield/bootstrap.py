@@ -165,6 +165,8 @@ def initialise(seed_demo: Optional[bool] = None, quiet: bool = False) -> dict:
                 demo.create_live_channels(db, settings.tenant_code, "installer")
         if seed_demo:
             _manual_channel_start(db, settings.tenant_code)
+            from .services import screening
+            screening.seed_demo(db, settings.tenant_code)
         if settings.background_jobs:
             start_enabled(db)
     return summary
