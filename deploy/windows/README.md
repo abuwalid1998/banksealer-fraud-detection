@@ -73,7 +73,7 @@ A summary without passwords is saved in `C:\ProgramData\VeriShield\INSTALL-SUMMA
 
 | Option | Default | Meaning |
 |---|---|---|
-| `-Mode Production\|Pilot` | Production | Production: MFA required, no development accounts, random bootstrap password. Pilot: also creates 2000 / 3001 / 3002 / 4000 with temporary passwords, MFA optional, bootstrap password `Admin` |
+| `-Mode Production\|Pilot` | Production | Production: MFA required, no development accounts, random bootstrap password. Pilot: also creates 2000 / 3001 / 3002 / 4000 / 5000 (CEO) with fixed test passwords (no first-login change), MFA optional, bootstrap password `Admin` |
 | `-Port 8443` | 8443 | port for browsers and the API |
 | `-Https SelfSigned\|Store\|Pfx\|None` | SelfSigned | certificate source (see below) |
 | `-CertThumbprint <thumbprint>` | | with `-Https Store`: certificate in `LocalMachine\My` (key must be exportable) |
@@ -137,9 +137,11 @@ Run in an elevated PowerShell in `C:\VeriShield`:
 
 * **Decision / events API:** create an API key in *Users & Settings › API clients* (in the workspace that should
   receive the data) and call `POST https://<server>:8443/api/v1/decisions/evaluate` or `/api/v1/transactions/events`.
-* **Demo live channels:** the Demo workspace listens on TCP 9009 (JSON lines) and HTTP 9010 (`/transactions`)
-  and watches `C:\ProgramData\VeriShield\data\incoming\transactions.csv`. Use `-OpenChannelPorts` if other
-  machines must send to 9009 / 9010.
+* **Demo live channels:** created but stopped – the IT Admin starts them in *Integrations & Channels* (payment gateway
+  simulator, TCP 9009 JSON lines, HTTP 9010 `/transactions`, `C:\ProgramData\VeriShield\data\incoming\transactions.csv`,
+  and the results database writer). Use `-OpenChannelPorts` if other machines must send to 9009 / 9010.
+* **E-mail & SMS:** point VeriShield at the bank's SMTP relay and SMS gateway under *E-mail & SMS* (switch each ON);
+  the server only needs network access to those two internal hosts.
 * Other channels (database replica, REST pull, file drop) are configured in *Integrations & Channels*.
 
 ## Troubleshooting

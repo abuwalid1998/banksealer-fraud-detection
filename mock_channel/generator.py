@@ -49,6 +49,49 @@ PHONE_PREFIX = {"IT": "+39 3", "DE": "+49 15", "FR": "+33 6", "PS": "+970 59"}
 RECHARGE_AMOUNTS = [5, 10, 15, 20, 25, 30, 50]
 DEFAULT_BANKS = {"BANK001": "IT", "BANK002": "DE"}
 
+# --------------------------------------------------------------------------- Palestine market profile
+# Realistic retail/business banking behaviour for a Palestinian bank (amounts in ILS): Sat-Thu working
+# week (Friday is the quiet day), salary-week peaks, local bank codes in IBANs, Jawwal / Ooredoo
+# recharges, named beneficiaries with payment purposes, city, channel and device per customer.
+PS_BANK_CODES = ["PALS", "PALS", "PALS", "ARAB", "QUDS", "PIBC", "CAAB", "BJOR", "SAFA", "ARIB", "TNBP"]
+PS_CITIES = ["Ramallah", "Ramallah", "Al-Bireh", "Nablus", "Nablus", "Hebron", "Hebron", "Bethlehem", "Jenin",
+             "Tulkarm", "Qalqilya", "Jericho", "Gaza", "Khan Younis", "Salfit", "Tubas"]
+PS_FIRST = ["Mohammad", "Ahmad", "Mahmoud", "Omar", "Khaled", "Yousef", "Ibrahim", "Rami", "Sami", "Tariq",
+            "Fadi", "Hani", "Nidal", "Basel", "Majd", "Ali", "Hasan", "Amjad", "Saleh", "Kareem",
+            "Fatima", "Maryam", "Aya", "Rana", "Hala", "Lina", "Dana", "Reem", "Nour", "Salma", "Rawan",
+            "Samah", "Ruba", "Ghada", "Leen", "Dima", "Haneen", "Asmaa", "Sireen", "Shireen"]
+PS_LAST = ["Abu Ghosh", "Barghouti", "Khalil", "Hamdan", "Odeh", "Nasser", "Saleh", "Haddad", "Khoury",
+           "Masri", "Shakaa", "Tamimi", "Jaber", "Darwish", "Awad", "Qasem", "Yasin", "Rabah", "Halabi",
+           "Shami", "Mansour", "Zaid", "Abu Eid", "Natsheh", "Qawasmi", "Jabari", "Sharabati", "Totah",
+           "Dajani", "Husseini", "Nashashibi", "Ayyad", "Abu Shanab", "Freij", "Kanaan"]
+PS_COMPANIES = ["Al-Quds Trading Co.", "Nablus Stone & Marble", "Hebron Glass Industries", "Ramallah Foods Ltd.",
+                "Bethlehem Olive Wood Crafts", "Jenin Agricultural Supplies", "Palestine Pharma Distribution",
+                "Al-Bireh Construction Co.", "Jericho Date Farms", "Tulkarm Steel Works", "Gaza Furniture House",
+                "Al-Amal Electronics", "Al-Nour Pharmacy", "Shams Solar Energy", "Al-Wataniya Logistics",
+                "Al-Zaytouna Supermarket", "Carmel Textile Factory", "Al-Rawda Medical Center",
+                "Bab Al-Sharq Restaurants", "Al-Manara Printing Press", "Kanaan Tech Solutions",
+                "Al-Huda Auto Parts", "Al-Jazeera Building Materials", "Sanabel Bakery"]
+PS_PURPOSES_RETAIL = ["Family support", "Rent payment", "University tuition", "Loan instalment",
+                      "Personal transfer", "Car instalment", "Medical expenses", "Wedding gift",
+                      "School fees", "Savings transfer", "Household expenses", "Furniture purchase"]
+PS_PURPOSES_BUSINESS = ["Supplier invoice", "Salaries", "Raw materials", "Goods purchase", "Customs clearance",
+                        "Equipment purchase", "Transport services", "Office rent", "Maintenance contract",
+                        "Wholesale order", "Advance payment", "Service fees"]
+PS_FOREIGN_LEGIT = ["JO", "JO", "JO", "AE", "SA", "TR", "QA", "DE"]
+PS_PHONE_PREFIX = {"Jawwal": ["+970 59"], "Ooredoo": ["+970 56"]}
+PS_RECHARGES = [10, 20, 20, 25, 30, 50, 50, 100]
+PS_CHANNELS = {"retail": ["mobile_banking"] * 6 + ["internet_banking"] * 2 + ["atm_kiosk", "branch"],
+               "affluent": ["mobile_banking"] * 5 + ["internet_banking"] * 4 + ["branch"],
+               "business": ["internet_banking"] * 6 + ["mobile_banking"] * 2 + ["branch"] * 2}
+PS_DEVICES = ["iPhone 15", "iPhone 13", "Samsung Galaxy S23", "Samsung Galaxy A54", "Xiaomi Redmi Note 12",
+              "Huawei P30", "Windows PC - Chrome", "Windows PC - Edge", "MacBook - Safari"]
+
+
+def ps_iban(rng: random.Random, bank: Optional[str] = None) -> str:
+    """Palestinian IBAN: PS + check digits + 4-letter bank code + 21 digits (29 characters)."""
+    bban = (bank or rng.choice(PS_BANK_CODES)) + "".join(rng.choices(string.digits, k=21))
+    return f"PS{iban_check_digits('PS', bban)}{bban}"
+
 
 def iban_check_digits(country: str, bban: str) -> str:
     rearranged = bban + country + "00"
@@ -61,7 +104,9 @@ def make_iban(rng: random.Random, country: str) -> str:
     if country == "IT":
         bban = rng.choice(string.ascii_uppercase) + "".join(rng.choices(string.digits, k=10)) + \
             "".join(rng.choices(string.digits + string.ascii_uppercase, k=12))
-    elif country in ("PS", "JO"):
+    elif country == "PS":
+        return ps_iban(rng)
+    elif country == "JO":
         bban = "".join(rng.choices(string.ascii_uppercase, k=4)) + "".join(rng.choices(string.digits, k=length - 4))
     else:
         bban = "".join(rng.choices(string.digits, k=length))
@@ -95,6 +140,13 @@ class Customer:
     hour_std: float
     weekend_factor: float = 0.6
     known: dict = field(default_factory=dict)
+    # optional realism attributes (Palestine profile)
+    name: str = ""
+    city: str = ""
+    payee_names: list = field(default_factory=list)
+    channels: list = field(default_factory=list)
+    devices: list = field(default_factory=list)
+    weekend_day: int = 5                      # first weekend weekday (5 = Saturday, 4 = Friday)
 
     @property
     def daily_rate(self) -> float:
@@ -118,6 +170,8 @@ class TransactionGenerator:
         rng = self.rng
         bank_id = rng.choice(list(self.banks))
         home = self.banks[bank_id]
+        if home == "PS":
+            return self._make_ps_customer(i, bank_id)
         segment = rng.choices(["retail", "affluent", "business"], weights=[70, 20, 10])[0]
         asns = rng.sample(HOME_ASNS[home], k=rng.choice([1, 1, 2]))
         ips = []
@@ -147,6 +201,46 @@ class TransactionGenerator:
             weekend_factor=0.2 if segment == "business" else 0.7,
         )
 
+    def _make_ps_customer(self, i: int, bank_id: str) -> Customer:
+        rng = self.rng
+        segment = rng.choices(["retail", "affluent", "business"], weights=[68, 20, 12])[0]
+        asns = rng.sample(HOME_ASNS["PS"], k=rng.choice([1, 1, 2]))
+        ips = [(make_ip(rng, prefix), f"PS-{asn}") for asn, prefix in asns for _ in range(rng.randint(1, 2))]
+        n_payees = {"retail": rng.randint(2, 6), "affluent": rng.randint(4, 10), "business": rng.randint(10, 26)}[segment]
+        foreign = {"retail": 0.05, "affluent": 0.12, "business": 0.18}[segment]
+        payees = [make_iban(rng, "PS" if rng.random() >= foreign else rng.choice(PS_FOREIGN_LEGIT))
+                  for _ in range(n_payees)]
+        if segment == "business":
+            payee_names = [rng.choice(PS_COMPANIES) if rng.random() < 0.6 else
+                           f"{rng.choice(PS_FIRST)} {rng.choice(PS_LAST)}" for _ in payees]
+            name = rng.choice(PS_COMPANIES)
+        else:
+            payee_names = [f"{rng.choice(PS_FIRST)} {rng.choice(PS_LAST)}" if rng.random() < 0.8 else
+                           rng.choice(PS_COMPANIES) for _ in payees]
+            name = f"{rng.choice(PS_FIRST)} {rng.choice(PS_LAST)}"
+        payee_weights = [1.0 / (k + 1) ** 0.8 for k in range(n_payees)]
+        transfer_rate, mu, sigma = {
+            "retail": (rng.uniform(0.12, 0.45), rng.uniform(5.3, 6.5), rng.uniform(0.35, 0.65)),     # ~200-670 ILS
+            "affluent": (rng.uniform(0.3, 0.85), rng.uniform(6.8, 7.9), rng.uniform(0.35, 0.6)),     # ~900-2,700
+            "business": (rng.uniform(1.0, 3.2), rng.uniform(7.4, 8.4), rng.uniform(0.4, 0.7)),       # ~1,600-4,450
+        }[segment]
+        operator = rng.choices(["Jawwal", "Ooredoo"], weights=[65, 35])[0]
+        phones = [f"{rng.choice(PS_PHONE_PREFIX[operator])}{rng.randint(0, 9)} {rng.randint(100000, 999999)}"
+                  for _ in range(rng.choice([1, 1, 2]))]
+        cards = [f"4{rng.randint(100, 999)} **** **** {rng.randint(1000, 9999)}" for _ in range(rng.choice([1, 1, 2]))]
+        hour_mean = rng.uniform(9.0, 20.0) if segment != "business" else rng.uniform(9.0, 14.5)
+        chans = PS_CHANNELS[segment]
+        return Customer(
+            user_id=f"C{i + 1:05d}", bank_id=bank_id, home="PS", segment=segment, asns=asns, ips=ips,
+            payees=payees, payee_weights=payee_weights, transfer_rate=transfer_rate, amount_mu=mu,
+            amount_sigma=sigma, recharge_rate=rng.uniform(0.05, 0.25) if rng.random() < 0.75 else 0.0,
+            phones=phones, operator=operator,
+            prepaid_rate=rng.uniform(0.02, 0.10) if rng.random() < 0.3 else 0.0, cards=cards,
+            prepaid_mu=rng.uniform(4.6, 6.0), hour_mean=hour_mean, hour_std=rng.uniform(1.3, 3.0),
+            weekend_factor=0.15 if segment == "business" else 0.55, name=name, city=rng.choice(PS_CITIES),
+            payee_names=payee_names, channels=[rng.choice(chans) for _ in range(3)],
+            devices=rng.sample(PS_DEVICES, k=rng.choice([1, 1, 2])), weekend_day=4)
+
     # -------------------------------------------------------------- helpers
     def _next_id(self) -> str:
         self._seq += 1
@@ -158,13 +252,24 @@ class TransactionGenerator:
         return day + timedelta(hours=hour, seconds=self.rng.randint(0, 59))
 
     def _base(self, c: Customer, ts: datetime, tx_type: str, amount: float, ip: tuple, fraud: str | None) -> dict:
-        return {
+        rec = {
             "tx_id": self._next_id(), "bank_id": c.bank_id, "user_id": c.user_id,
             "timestamp": ts.isoformat(sep=" ", timespec="seconds"), "tx_type": tx_type,
             "amount": round(amount, 2), "currency": self.currency, "iban": None, "ip": ip[0], "cc_asn": ip[1],
             "session_id": uuid.UUID(int=self.rng.getrandbits(128)).hex[:16], "card_id": None,
             "phone_number": None, "operator": None, "is_fraud": 1 if fraud else 0, "scenario": fraud or "",
         }
+        if c.city:
+            channel = self.rng.choice(c.channels)
+            if channel == "branch" and not (8 <= ts.hour < 15 and ts.weekday() != 4):
+                channel = "mobile_banking"          # branches are open Sat-Thu 08:00-15:00
+            if fraud and ip not in c.ips:
+                channel, device = self.rng.choice(["mobile_banking", "internet_banking"]), "Unknown device"
+            else:
+                device = {"branch": "Branch counter", "atm_kiosk": "ATM / kiosk"}.get(channel) or \
+                    self.rng.choice(c.devices)
+            rec.update({"channel": channel, "city": c.city, "device": device})
+        return rec
 
     def _home_ip(self, c: Customer) -> tuple:
         return self.rng.choices(c.ips, weights=[3] + [1] * (len(c.ips) - 1))[0]
@@ -179,15 +284,28 @@ class TransactionGenerator:
     # ------------------------------------------------------------- legit
     def _legit_day(self, c: Customer, day: datetime) -> list[dict]:
         rng = self.rng
-        factor = c.weekend_factor if day.weekday() >= 5 else 1.0
+        if c.city:   # Palestine profile: Friday is the quiet day, Saturday reduced; salary week busier
+            wd = day.weekday()
+            factor = c.weekend_factor if wd == 4 else (0.8 if wd == 5 and c.segment != "business" else 1.0)
+            if day.day <= 5 or day.day >= 27:
+                factor *= 1.35
+        else:
+            factor = c.weekend_factor if day.weekday() >= 5 else 1.0
+        cap = 14000.0 if c.city else 9500.0
         out = []
         for _ in range(self._poisson(c.transfer_rate * factor)):
             tx = self._base(c, self._time(day, c), "bank_transfer",
-                            min(rng.lognormvariate(c.amount_mu, c.amount_sigma), 9500.0), self._home_ip(c), None)
-            tx["iban"] = rng.choices(c.payees, weights=c.payee_weights)[0]
+                            min(rng.lognormvariate(c.amount_mu, c.amount_sigma), cap), self._home_ip(c), None)
+            k = rng.choices(range(len(c.payees)), weights=c.payee_weights)[0]
+            tx["iban"] = c.payees[k]
+            if c.city:
+                tx["amount"] = self._round_amount(tx["amount"])
+                tx["beneficiary_name"] = c.payee_names[k]
+                tx["purpose"] = rng.choice(PS_PURPOSES_BUSINESS if c.segment == "business" else PS_PURPOSES_RETAIL)
             out.append(tx)
         for _ in range(self._poisson(c.recharge_rate * factor)):
-            tx = self._base(c, self._time(day, c), "phone_recharge", rng.choice(RECHARGE_AMOUNTS[:5]),
+            amount = rng.choice(PS_RECHARGES) if c.city else rng.choice(RECHARGE_AMOUNTS[:5])
+            tx = self._base(c, self._time(day, c), "phone_recharge", amount,
                             self._home_ip(c), None)
             tx["phone_number"] = rng.choices(c.phones, weights=[4] + [1] * (len(c.phones) - 1))[0]
             tx["operator"] = c.operator
@@ -198,6 +316,15 @@ class TransactionGenerator:
             tx["card_id"] = rng.choice(c.cards)
             out.append(tx)
         return out
+
+    def _round_amount(self, amount: float) -> float:
+        """People type round amounts: most transfers end in 0 / 50 / 100; some keep exact invoice values."""
+        r = self.rng.random()
+        if amount >= 1000 and r < 0.55:
+            return float(round(amount / 100) * 100)
+        if amount >= 100 and r < 0.7:
+            return float(round(amount / 10) * 10)
+        return round(amount, 2)
 
     def _poisson(self, lam: float) -> int:
         if lam <= 0:
@@ -252,6 +379,13 @@ class TransactionGenerator:
                 tx["card_id"] = card
                 out.append(tx)
                 ts += timedelta(minutes=rng.randint(2, 30))
+        if c.city:
+            for tx in out:
+                if tx["tx_type"] == "bank_transfer":
+                    tx["beneficiary_name"] = f"{rng.choice(PS_FIRST)} {rng.choice(PS_LAST)}" \
+                        if tx["iban"].startswith("PS") else rng.choice(["Global Trade FZE", "M. Petrov", "Atlas Imports Ltd",
+                                                                       "Nova Services SRL", "J. Smith", "Sunrise Holdings"])
+                    tx["purpose"] = rng.choice(["Personal transfer", "Goods purchase", "Investment", "Family support"])
         return out
 
     # ------------------------------------------------------------ simulation

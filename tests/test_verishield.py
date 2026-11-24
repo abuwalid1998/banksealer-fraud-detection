@@ -15,18 +15,23 @@ from verishield.settings import configure  # noqa: E402
 _tmp = tempfile.mkdtemp(prefix="verishield-test-")
 configure(data_dir=__import__("pathlib").Path(_tmp), database_url=os.environ.get("VERISHIELD_TEST_DATABASE_URL", f"sqlite:///{_tmp}/test.db"),
           background_jobs=False, seed_demo=True, seed_demo_users=True, demo_customers=80, demo_history_days=35,
-          require_mfa=False)
+          require_mfa=False, demo_fixed_passwords=False)
 
 from verishield.app import app  # noqa: E402
 
 PASSWORDS = {"1000": "Admin", "2000": "Manager#2026", "3001": "Analyst1#2026", "3002": "Analyst2#2026",
-             "4000": "Chief#2026"}
+             "4000": "Chief#2026", "5000": "Ceo#2026"}
 NEW = "N3w!Secure-Pass"
 
 
 @pytest.fixture(scope="module")
 def client():
     with TestClient(app) as c:
+        from verishield.db import SessionLocal
+        from verishield.services import demo
+        with SessionLocal() as db:
+            assert db.execute(select(__import__("verishield.models", fromlist=["Decision"]).Decision.id)).first() is None
+            demo.pump(db, "BOP", 400)      # nothing is pre-scored: stream gateway transactions through the engine
         yield c
 
 
@@ -114,6 +119,15 @@ def test_lockout_after_failed_logins(client):
     ("2000", "get", "/api/v1/alerts", 200),
     ("4000", "get", "/api/v1/audit", 200),
     ("1000", "get", "/api/v1/connectors", 200),
+    ("5000", "get", "/api/v1/users", 403),
+    ("5000", "post", "/api/v1/cases", 403),
+    ("5000", "get", "/api/v1/notifications", 403),
+    ("5000", "get", "/api/v1/dashboard", 200),
+    ("5000", "get", "/api/v1/models/clusters", 200),
+    ("2000", "get", "/api/v1/models/clusters", 200),
+    ("2000", "get", "/api/v1/mcp/settings", 403),
+    ("1000", "get", "/api/v1/notifications", 200),
+    ("1000", "get", "/api/v1/models/health", 200),
 ])
 def test_role_matrix(client, user, method, path, expected):
     h = login(client, user)
@@ -335,3 +349,164 @@ def teardown_module(_):
     import shutil
     shutil.rmtree(_tmp, ignore_errors=True)
     os.environ.pop("VERISHIELD_DATA_DIR", None)
+
+
+# --------------------------------------------------------------------------- v1.2 features
+def test_demo_channels_wait_for_it_admin_and_results_are_written(client):
+    import time
+    h = login(client, "1000")
+    if not client.get("/api/v1/demo", headers=h).json()["demo_mode"]:
+        client.post("/api/v1/demo/mode", headers=h, json={"enabled": True})
+    cons = client.get("/api/v1/connectors", headers=h).json()["connectors"]
+    by_type = {c["type"]: c for c in cons}
+    assert {"demo_stream", "tcp_json", "http_listener", "file_drop", "db_results"} <= set(by_type)
+    assert not any(c["running"] for c in cons)                        # nothing streams until started
+    res = by_type["db_results"]
+    assert client.post(f"/api/v1/connectors/{res['id']}/enable", headers=h).json()["status"] == "ENABLED"
+    from verishield.db import SessionLocal
+    from verishield.services import demo
+    with SessionLocal() as db:
+        assert demo.pump(db, "BOP", 40) == 40
+    deadline = time.time() + 15
+    written = 0
+    while time.time() < deadline and written < 40:
+        time.sleep(1)
+        written = client.get(f"/api/v1/connectors/{res['id']}", headers=h).json()["counters"].get("received", 0)
+    assert written >= 40
+    import sqlalchemy
+    eng = sqlalchemy.create_engine(res["config"]["url"])
+    with eng.connect() as conn:
+        row = conn.execute(sqlalchemy.text("SELECT decision, fraud_score, model_version FROM fraud_results LIMIT 1")).first()
+    eng.dispose()
+    assert row and row[0] in ("PASS", "REVIEW", "HOLD", "DECLINE", "ERROR_POLICY") and row[2]
+    client.post(f"/api/v1/connectors/{res['id']}/disable", headers=h)
+
+
+def test_gateway_simulator_is_realistic():
+    from verishield.models import utcnow
+    from verishield.services.demo import GatewaySimulator
+    sim = GatewaySimulator("BOP", 0.03, speed=1e9)
+    recs = sim.due(5000)
+    assert all(r["timestamp"] <= utcnow().isoformat(sep=" ") for r in recs)   # never in the future
+    more = sim.take(300)
+    assert {"channel", "city", "device"} <= set(more[0])
+    transfers = [r for r in more if r["tx_type"] == "bank_transfer"]
+    assert transfers and all(r["iban"] and r.get("beneficiary_name") for r in transfers)
+    assert any(r["iban"].startswith("PS") and len(r["iban"]) == 29 for r in transfers)
+
+
+def test_fixed_demo_passwords_skip_first_login_change():
+    from verishield.bootstrap import apply_fixed_demo_passwords
+    from verishield.db import session_scope
+    from verishield.models import Tenant, User
+    from verishield.security import hash_password
+    from verishield.settings import settings
+    with session_scope() as db:
+        t = db.get(Tenant, "BOP")
+        u = db.execute(select(User).where(User.tenant_id == "BOP", User.username == "4000")).scalar()
+        saved = (u.password_hash, u.must_change_password, u.status)
+        u.password_hash, u.must_change_password, u.status = hash_password("Chief#2026"), True, "INVITED"
+        db.flush()
+        settings.demo_fixed_passwords = True
+        try:
+            assert apply_fixed_demo_passwords(db, t) >= 1
+        finally:
+            settings.demo_fixed_passwords = False
+        assert u.must_change_password is False and u.status == "ACTIVE"
+        u.password_hash, u.must_change_password, u.status = saved
+
+
+def test_ceo_executive_overview_and_board_report(client):
+    h = login(client, "5000")
+    d = client.get("/api/v1/dashboard", headers=h).json()
+    assert d["role"] == "CEO" and d["kpis"]["transactions"] > 0 and len(d["trend"]) == 30
+    assert client.get("/api/v1/auth/me", headers=h).json()["user"]["role_label"] == "Chief Executive Officer"
+    for typ in ("board_overview", "customer_portfolio", "transaction_activity"):
+        r = client.post("/api/v1/reports", headers=h, json={"type": typ, "format": "pdf"})
+        assert r.status_code == 201 and r.json()["status"] == "DONE", r.text
+    blob = client.get(f"/api/v1/reports/{r.json()['id']}/download", headers=h).content
+    assert blob[:4] == b"%PDF" and b"VeriShield" not in blob.split(b"stream")[0]
+
+
+def test_forgot_password_and_admin_reset(client):
+    r = client.post("/api/v1/auth/forgot-password", json={"username": "3002", "channel": "email"})
+    assert r.status_code == 200 and r.json()["dev_code"]           # development: no SMTP configured
+    unknown = client.post("/api/v1/auth/forgot-password", json={"username": "9999", "channel": "email"}).json()
+    assert "dev_code" not in unknown and unknown["message"] == r.json()["message"].split(" (Development")[0]
+    assert client.post("/api/v1/auth/reset-password", json={"username": "3002", "code": "000000",
+                                                             "new_password": "Brand!New-Pass9"}).status_code == 400
+    ok = client.post("/api/v1/auth/reset-password", json={"username": "3002", "code": r.json()["dev_code"],
+                                                          "new_password": "Brand!New-Pass9"})
+    assert ok.status_code == 200
+    assert client.post("/api/v1/auth/login", json={"username": "3002", "password": "Brand!New-Pass9"}).status_code == 200
+    admin = login(client, "1000")
+    uid = next(u["id"] for u in client.get("/api/v1/users", headers=admin).json()["users"] if u["username"] == "3002")
+    weak = client.post(f"/api/v1/users/{uid}/reset-password", headers=admin, json={"password": "short"})
+    assert weak.status_code == 422
+    r = client.post(f"/api/v1/users/{uid}/reset-password", headers=admin,
+                    json={"password": "Admin!Chosen-77", "require_change": False, "notify": ["email"]})
+    assert r.status_code == 200 and r.json()["temporary_password"] is None
+    assert r.json()["delivery"]["email"]["sent"] is False                    # e-mail channel is switched off
+    login_r = client.post("/api/v1/auth/login", json={"username": "3002", "password": "Admin!Chosen-77"}).json()
+    assert login_r["restrictions"] == []
+    _tokens.pop(("BOP", "3002"), None)
+    PASSWORDS["3002"] = "Admin!Chosen-77"
+
+
+def test_notification_settings_keep_secrets_out(client):
+    h = login(client, "1000")
+    r = client.put("/api/v1/notifications", headers=h, json={"email": {"enabled": True, "host": "127.0.0.1",
+                                                                      "port": 1, "from_address": "vs@bank.ps",
+                                                                      "security": "NONE"}})
+    assert r.status_code == 200 and r.json()["config"]["email"]["ready"]
+    assert client.put("/api/v1/notifications", headers=h, json={"sms": {"url": "ftp://x"}}).status_code == 422
+    s = client.post("/api/v1/notifications/secret", headers=h, json={"channel": "sms", "value": "TOKEN-XYZ-123"})
+    assert s.status_code == 200 and "TOKEN-XYZ-123" not in s.text and s.json()["config"]["sms"]["secret_configured"]
+    t = client.post("/api/v1/notifications/test", headers=h, json={"channel": "email", "to": "a@b.c"}).json()
+    assert t["ok"] is False
+    out = client.get("/api/v1/notifications", headers=h).json()
+    assert out["outbox"][0]["status"] == "FAILED" and "TOKEN-XYZ-123" not in str(out)
+    client.put("/api/v1/notifications", headers=h, json={"email": {"enabled": False}})
+
+
+def test_mcp_switch_and_tools(client):
+    h = login(client, "1000")
+    key = client.post("/api/v1/mcp/keys", headers=h, json={"name": "test agent"}).json()["api_key"]
+    hk = {"X-API-Key": key}
+    off = client.post("/mcp", headers=hk, json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
+    assert off.status_code == 403 and "switched off" in off.json()["error"]["message"]
+    client.put("/api/v1/mcp/settings", headers=h, json={"enabled": True, "tools": ["get_model_health", "get_clusters"]})
+    init = client.post("/mcp", headers=hk, json={"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}).json()
+    assert init["result"]["serverInfo"]["name"].startswith("verishield")
+    tools = client.post("/mcp", headers=hk, json={"jsonrpc": "2.0", "id": 2, "method": "tools/list"}).json()
+    assert {t["name"] for t in tools["result"]["tools"]} == {"get_model_health", "get_clusters"}
+    call = client.post("/mcp", headers=hk, json={"jsonrpc": "2.0", "id": 3, "method": "tools/call",
+                                                 "params": {"name": "get_model_health", "arguments": {}}}).json()
+    assert call["result"]["isError"] is False and '"checks"' in call["result"]["content"][0]["text"]
+    blocked = client.post("/mcp", headers=hk, json={"jsonrpc": "2.0", "id": 4, "method": "tools/call",
+                                                    "params": {"name": "list_connectors", "arguments": {}}}).json()
+    assert blocked["error"]["code"] == -32602
+    assert client.get("/api/v1/mcp/policy", headers=hk).json()["tools"] == ["get_model_health", "get_clusters"]
+    client.put("/api/v1/mcp/settings", headers=h, json={"enabled": False})
+
+
+def test_model_settings_health_clusters_and_retrain(client):
+    h = login(client, "1000")
+    p = client.get("/api/v1/models/params", headers=h).json()
+    assert p["editable"] and any(x["id"] == "global.eps" for x in p["parameters"])
+    assert client.put("/api/v1/models/params", headers=h, json={"values": {"global.eps": 99}}).status_code == 422
+    assert client.put("/api/v1/models/params", headers=h,
+                      json={"values": {"engine.profile_weights.local": 0.9}}).status_code == 422   # weights != 1
+    ok = client.put("/api/v1/models/params", headers=h, json={"values": {"global.eps": 1.5, "segmentation.k_max": 5}})
+    assert ok.status_code == 200 and ok.json()["overrides"]["global"]["eps"] == 1.5
+    health = client.get("/api/v1/models/health", headers=h).json()
+    assert health["status"] in ("OK", "CONSIDER", "RETRAIN_RECOMMENDED") and len(health["checks"]) >= 6
+    m = client.post("/api/v1/models/fraud/train", headers=h, json={"mode": "trained"}).json()
+    assert m["metrics"]["parameter_overrides"]["global"]["eps"] == 1.5
+    assert m["metrics"]["hyperparameters"]["global"]["eps"] == 1.5
+    seg = client.post("/api/v1/models/segmentation/build", headers=h, json={"activate": True})
+    assert seg.status_code == 200
+    cl = client.get("/api/v1/models/clusters", headers=login(client, "2000")).json()
+    assert cl["segmentation"]["metrics"]["k"] <= 5 and len(cl["segmentation"]["points"]) > 50
+    assert cl["peer_groups"]["groups"] and cl["segmentation"]["points"][0]["name"]
+    client.put("/api/v1/models/params", headers=h, json={"reset": True})

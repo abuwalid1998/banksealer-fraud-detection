@@ -21,8 +21,8 @@ from sqlalchemy.orm import Session
 
 from .. import audit
 from ..deps import Principal
-from ..models import (Alert, Case, CaseEntityLink, CaseEvent, CaseNote, Customer, EvidenceReference, Transaction,
-                      User, utcnow)
+from ..models import (Alert, Case, CaseEntityLink, CaseEvent, CaseNote, Customer, EvidenceReference, Tenant,
+                      Transaction, User, utcnow)
 from ..settings import settings
 from .common import row_dict, space_ref
 
@@ -299,6 +299,14 @@ def assign(db: Session, p: Principal, case: Case, assignee_id: str, note: str = 
                  before={"assignee": previous}, after={"assignee": user.id}, commit=False)
     if commit:
         db.commit()
+    from . import notify
+    tenant = db.get(Tenant, p.tenant_id)
+    if tenant is not None:
+        notify.enqueue(tenant, "case_assigned", email=user.email, phone=user.phone,
+                       subject=f"Case {case.id} assigned to you",
+                       text=f"{p.display} assigned AML case {case.id} ({case.priority}) to you: {case.title}. "
+                            f"Due {case.due_at:%d %b %Y %H:%M} UTC." if case.due_at else
+                       f"{p.display} assigned AML case {case.id} ({case.priority}) to you: {case.title}.")
     return case
 
 

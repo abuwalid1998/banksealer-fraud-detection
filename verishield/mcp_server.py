@@ -13,7 +13,9 @@ Claude Desktop / Claude Code configuration example::
         "args": ["-m", "verishield.mcp_server", "--url", "http://localhost:8000"],
         "env": {"VERISHIELD_API_KEY": "vs_xxx.yyy"}}}}
 
-Recommended API-key scopes: read:operations, read:aml, reports:generate, policies:simulate.
+Recommended API-key scopes: mcp:use, read:operations, read:aml, reports:generate, policies:simulate.
+The IT Admin switches AI-agent access ON/OFF and chooses the allowed tools under *AI Agents (MCP)*; the
+same settings apply to the built-in HTTP endpoint ``/mcp`` (no local process needed).
 """
 from __future__ import annotations
 
@@ -55,6 +57,12 @@ TOOLS = [
      "inputSchema": {"type": "object", "properties": {"policy_id": {"type": "string"}, "days": {"type": "integer"}},
                      "required": ["policy_id"]},
      "call": ("POST", "/api/v1/policies/{policy_id}/simulate")},
+    {"name": "get_dashboard", "description": "Dashboard figures of the workspace the key is bound to.",
+     "inputSchema": {"type": "object", "properties": {}}, "call": ("GET", "/api/v1/dashboard")},
+    {"name": "get_clusters", "description": "Customer clusters (segments) found by the segmentation model, with profiles.",
+     "inputSchema": {"type": "object", "properties": {}}, "call": ("GET", "/api/v1/models/clusters")},
+    {"name": "get_model_health", "description": "Model health measurements, drift and the retraining recommendation.",
+     "inputSchema": {"type": "object", "properties": {}}, "call": ("GET", "/api/v1/models/health")},
     {"name": "generate_report", "description": "Generate a permitted report (e.g. system_failures, channel_health, model_health). Returns the report job.",
      "inputSchema": {"type": "object", "properties": {"type": {"type": "string"}, "format": {"type": "string", "enum": ["pdf", "csv", "xlsx"]}},
                      "required": ["type"]},
@@ -65,6 +73,15 @@ TOOLS = [
 class Client:
     def __init__(self, url: str, key: str):
         self.url, self.key = url.rstrip("/"), key
+
+    def allowed_tools(self):
+        """Tools the IT Admin enabled for AI agents (None = server too old to say)."""
+        policy = self.call("GET", "/api/v1/mcp/policy", {})
+        if isinstance(policy, dict) and "tools" in policy:
+            if not policy.get("enabled"):
+                return set()
+            return set(policy["tools"])
+        return None
 
     def call(self, method: str, path: str, args: dict) -> object:
         path = path.format(**{k: urllib.parse.quote(str(v), safe="") for k, v in args.items()})
@@ -90,11 +107,14 @@ def handle(client: Client, msg: dict) -> dict | None:
         result = {"protocolVersion": PROTOCOL, "capabilities": {"tools": {}},
                   "serverInfo": {"name": "verishield", "version": "1.0.0"}}
     elif method == "tools/list":
-        result = {"tools": [{k: t[k] for k in ("name", "description", "inputSchema")} for t in TOOLS]}
+        allowed = client.allowed_tools()
+        result = {"tools": [{k: t[k] for k in ("name", "description", "inputSchema")} for t in TOOLS
+                            if allowed is None or t["name"] in allowed]}
     elif method == "tools/call":
         tool = next((t for t in TOOLS if t["name"] == params.get("name")), None)
-        if tool is None:
-            return {"jsonrpc": "2.0", "id": mid, "error": {"code": -32602, "message": "unknown tool"}}
+        allowed = client.allowed_tools()
+        if tool is None or (allowed is not None and tool["name"] not in allowed):
+            return {"jsonrpc": "2.0", "id": mid, "error": {"code": -32602, "message": "unknown or disabled tool"}}
         data = client.call(*tool["call"], params.get("arguments") or {})
         result = {"content": [{"type": "text", "text": json.dumps(data, indent=1, default=str)[:60000]}],
                   "isError": isinstance(data, dict) and "error" in data}

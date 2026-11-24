@@ -25,9 +25,9 @@ def new_id(prefix: str = "") -> str:
     return f"{prefix}{uuid.uuid4().hex[:12].upper()}" if prefix else str(uuid.uuid4())
 
 
-ROLES = ("IT_ADMIN", "AML_MANAGER", "AML_EMPLOYEE", "CHIEF_AML")
+ROLES = ("IT_ADMIN", "AML_MANAGER", "AML_EMPLOYEE", "CHIEF_AML", "CEO")
 ROLE_LABELS = {"IT_ADMIN": "IT Admin", "AML_MANAGER": "AML Manager", "AML_EMPLOYEE": "AML Employee",
-               "CHIEF_AML": "Chief AML / Compliance"}
+               "CHIEF_AML": "Chief AML / Compliance", "CEO": "Chief Executive Officer"}
 SPACES = ("LIVE", "DEMO")
 
 
@@ -76,6 +76,10 @@ class User(Base):
     last_login_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     reset_by: Mapped[Optional[str]] = mapped_column(String(36), nullable=True)
     reset_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    phone: Mapped[str] = mapped_column(String(32), default="")              # mobile for SMS codes
+    reset_code_hash: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    reset_code_expires_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    reset_attempts: Mapped[int] = mapped_column(Integer, default=0)
 
     @property
     def full_name(self) -> str:
@@ -260,7 +264,8 @@ class Transaction(Base):
     __table_args__ = (UniqueConstraint("tenant_id", "space", "tx_ref", name="uq_tx"),
                       Index("ix_tx_tenant_customer_ts", "tenant_id", "space", "customer_ref", "ts"),
                       Index("ix_tx_tenant_ts", "tenant_id", "space", "ts"),
-                      Index("ix_tx_beneficiary", "tenant_id", "space", "beneficiary", "ts"))
+                      Index("ix_tx_beneficiary", "tenant_id", "space", "beneficiary", "ts"),
+                      Index("ix_tx_decision", "decision_id"))
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     tenant_id: Mapped[str] = mapped_column(String(16))
     space: Mapped[str] = mapped_column(String(8), default="LIVE")
@@ -543,3 +548,18 @@ class Counter(Base):
     tenant_id: Mapped[str] = mapped_column(String(16), primary_key=True)
     name: Mapped[str] = mapped_column(String(40), primary_key=True)
     value: Mapped[int] = mapped_column(Integer, default=0)
+
+
+class NotificationLog(Base):
+    """Outbox of e-mail / SMS notifications (message bodies holding codes or passwords are never stored)."""
+    __tablename__ = "notification_log"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    tenant_id: Mapped[str] = mapped_column(String(16), index=True)
+    channel: Mapped[str] = mapped_column(String(8))                       # EMAIL | SMS
+    event: Mapped[str] = mapped_column(String(40), default="")
+    recipient: Mapped[str] = mapped_column(String(200), default="")
+    subject: Mapped[str] = mapped_column(String(200), default="")
+    preview: Mapped[str] = mapped_column(Text, default="")
+    status: Mapped[str] = mapped_column(String(12), default="SENT")      # SENT FAILED DISABLED
+    error: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)

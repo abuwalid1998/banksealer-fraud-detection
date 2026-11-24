@@ -209,7 +209,14 @@ def data_quality(db: Session, tenant_id: str, space: str) -> dict:
 
 
 # --------------------------------------------------------------------------- build
-def build_segmentation(db: Session, tenant_id: str, space: str, actor: str = "system") -> ModelVersion:
+def build_segmentation(db: Session, tenant_id: str, space: str, actor: str = "system",
+                       params: Optional[dict] = None) -> ModelVersion:
+    from ..models import Tenant
+    from .model_ops import SEGMENT_DEFAULTS, overrides
+    if params is None:
+        tenant = db.get(Tenant, tenant_id)
+        params = (overrides(tenant, space).get("segmentation") or {}) if tenant else {}
+    sp = {**SEGMENT_DEFAULTS, **(params or {})}
     customers = db.execute(select(Customer).where(Customer.tenant_id == tenant_id, Customer.space == space)
                            ).scalars().all()
     if len(customers) < 12:
@@ -229,11 +236,12 @@ def build_segmentation(db: Session, tenant_id: str, space: str, actor: str = "sy
     x = (raw - mu) / sd
     nk = len(KYC_FEATURES)
     # behaviour has more weight when it exists; KYC drives cold start
-    weights = np.array([1.0] * nk + [1.2] * len(BEHAVIOUR_FEATURES))
+    weights = np.array([1.0] * nk + [float(sp["behaviour_weight"])] * len(BEHAVIOUR_FEATURES))
     xw = x * weights
 
     best = None
-    for k in range(3, min(8, len(customers) // 4) + 1):
+    k_lo = max(2, int(sp["k_min"]))
+    for k in range(k_lo, max(k_lo, min(int(sp["k_max"]), len(customers) // 4)) + 1):
         labels, centers, inertia = _kmeans(xw, k, seed=7)
         sil = _silhouette(xw, labels)
         if best is None or sil > best["silhouette"] + 0.01:
@@ -290,6 +298,7 @@ def build_segmentation(db: Session, tenant_id: str, space: str, actor: str = "sy
                                "customers": len(customers), "with_history": int(sum(has_hist)),
                                "cold_start": int(len(customers) - sum(has_hist)),
                                "segment_sizes": {s["label"]: s["size"] for s in segments},
+                               "parameters": sp,
                                "artifact": artifact},
                       features=features, training_size=len(customers), trained_by=actor,
                       notes="k-means over standardised KYC + behavioural features; k selected by silhouette.")

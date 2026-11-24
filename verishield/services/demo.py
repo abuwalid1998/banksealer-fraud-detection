@@ -11,14 +11,14 @@ import random
 import shutil
 import threading
 import time
-from datetime import timedelta
+from datetime import datetime, timedelta
 from typing import Iterator, Optional
 
 from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
 from banksealer.preparation import TransactionPreparer
-from mock_channel.generator import TransactionGenerator, make_iban
+from mock_channel.generator import PS_CITIES, PS_COMPANIES, PS_FIRST, PS_LAST, TransactionGenerator, make_iban
 
 from .. import audit
 from ..deps import Principal
@@ -28,7 +28,7 @@ from ..models import (Alert, ApiClient, Case, CaseEntityLink, CaseEvent, CaseNot
 from ..settings import settings
 from . import cases as case_service
 from . import engine_registry, segmentation
-from .decision import engine_tx_fields, evaluate
+from .decision import _enrich, engine_tx_fields, evaluate
 from .engine_registry import model_dir
 
 log = logging.getLogger("verishield.demo")
@@ -68,9 +68,10 @@ def generator(tenant: Tenant, fresh: bool = False) -> TransactionGenerator:
     with _gen_lock:
         if fresh or tenant.id not in _gens:
             p = _params(tenant)
+            # the historical import ends yesterday 00:00 (local); the gateway simulator streams from there
             _gens[tenant.id] = TransactionGenerator(p["customers"], banks={tenant.id: "PS"}, seed=p["seed"],
                                                     fraud_ratio=0.04, currency=tenant.base_currency,
-                                                    start=utcnow() - timedelta(days=2))
+                                                    start=local_today(_tz(tenant)) - timedelta(days=1))
         return _gens[tenant.id]
 
 
@@ -81,7 +82,9 @@ def _persona(gen: TransactionGenerator, ref: str):
 # --------------------------------------------------------------------------- seed
 def _customer_row(tenant: Tenant, c, rng: random.Random) -> Customer:
     business = c.segment == "business"
-    if business:
+    if c.name:
+        name = c.name
+    elif business:
         name = f"{rng.choice(LAST)} {rng.choice(BUSINESS)}"
     else:
         name = f"{rng.choice(FIRST)} {rng.choice(LAST)}"
@@ -104,11 +107,16 @@ def _customer_row(tenant: Tenant, c, rng: random.Random) -> Customer:
                     expected_monthly_tx=round(c.daily_rate * 30, 1),
                     account_purpose="Business operations" if business else rng.choice(
                         ["Salary and personal expenses", "Family support", "Savings and bill payments"]),
-                    attributes={"synthetic": True, "persona_segment": c.segment})
+                    attributes={"synthetic": True, "persona_segment": c.segment, "city": c.city or "",
+                                "home_branch": f"{c.city} branch" if c.city else ""})
 
 
-def seed(db: Session, tenant_id: str, actor: str = "system", with_cases: bool = True) -> dict:
-    """Create the synthetic dataset, train demo models and generate recent decisions/alerts/cases."""
+def seed(db: Session, tenant_id: str, actor: str = "system", with_cases: bool = False) -> dict:
+    """Prepare the Demo workspace: customer master data (KYC), a historical transaction import and real models.
+
+    Nothing is pre-scored: no decisions, alerts or cases are created here. Scores appear only when the IT Admin
+    starts a live channel (or a system posts to the decision API) and transactions flow through the engine.
+    """
     started = time.time()
     tenant = db.get(Tenant, tenant_id)
     rng = random.Random(_params(tenant)["seed"])
@@ -121,63 +129,55 @@ def seed(db: Session, tenant_id: str, actor: str = "system", with_cases: bool = 
     for i in range(1, 9):
         business = i % 4 == 0
         db.add(Customer(tenant_id=tenant.id, space="DEMO", customer_ref=f"N{i:05d}",
-                        display_name=f"{rng.choice(LAST)} {rng.choice(BUSINESS)}" if business else
-                        f"{rng.choice(FIRST)} {rng.choice(LAST)}",
+                        display_name=rng.choice(PS_COMPANIES) if business else
+                        f"{rng.choice(PS_FIRST)} {rng.choice(PS_LAST)}",
                         customer_type="BUSINESS" if business else "INDIVIDUAL",
                         business_activity=rng.choice(ACTIVITIES_BUS if business else ACTIVITIES_IND),
                         risk_category="LOW" if i % 3 else "MEDIUM", kyc_review_status="CURRENT", country="PS",
                         tenure_months=0, products=["current_account", "mobile_banking"],
                         expected_monthly_turnover=float(rng.choice([1500, 3000, 6000, 25000 if business else 4000])),
                         expected_monthly_tx=float(rng.choice([8, 15, 25])), account_purpose="New relationship",
-                        attributes={"synthetic": True, "onboarding": "new customer - no history"}))
+                        attributes={"synthetic": True, "onboarding": "new customer - no history",
+                                    "city": rng.choice(PS_CITIES)}))
     db.commit()
 
+    # historical import (settled transactions) used to train the models - exactly what a bank loads at go-live
     prep = TransactionPreparer(default_bank=tenant.id)
-    history = prep.prepare_many(gen.history(days, 0.0), "demo-history")
-    for etx in history:
-        db.add(Transaction(tenant_id=tenant.id, space="DEMO", tx_ref=etx.tx_id, mode="HISTORY",
-                           source="Demo history import", channel=rng.choice(CHANNELS), execution_state="SETTLED",
-                           **engine_tx_fields(etx)))
+    n_hist = 0
+    tz = _tz(tenant)
+    for raw in gen.history(days, 0.0):
+        raw["timestamp"] = local_to_utc(datetime.fromisoformat(str(raw["timestamp"])), tz).isoformat(
+            sep=" ", timespec="seconds")
+        etx = prep.prepare(raw, "demo-history")
+        if etx is None:
+            continue
+        row = Transaction(tenant_id=tenant.id, space="DEMO", tx_ref=etx.tx_id, mode="HISTORY",
+                          source="Historical import (core banking, last %d days)" % days,
+                          channel=str(raw.get("channel") or rng.choice(CHANNELS)), execution_state="SETTLED",
+                          **engine_tx_fields(etx))
+        _enrich(row, raw)
+        row.created_at = min(etx.timestamp, utcnow())
+        db.add(row)
+        n_hist += 1
+        if n_hist % 2000 == 0:
+            db.commit()
     db.commit()
 
     seg = segmentation.build_segmentation(db, tenant.id, "DEMO", actor)
     segmentation.activate_segmentation(db, seg.id, actor)
     model = engine_registry.train_fraud_model(db, tenant.id, "DEMO", actor, activate=True,
-                                              notes="Synthetic demo history (Demo Mode namespace)")
-
-    # two recent days of scored activity
-    stop = utcnow()
-    n_live = 0
-    end_day = gen.cursor + timedelta(days=3)
-    for record in gen.live(0.05):
-        if gen.cursor >= end_day or str(record["timestamp"]) > stop.isoformat(sep=" ", timespec="seconds"):
-            break
-        post = rng.random() < 0.2
-        record["channel"] = "core_batch" if post else rng.choice(CHANNELS)
-        try:
-            evaluate(db, tenant.id, "DEMO", record, mode="POST_EVENT" if post else "PRE_AUTH",
-                     source="Core banking batch (demo)" if post else "Payment switch (demo)", caller="demo-seed")
-            n_live += 1
-        except Exception as exc:  # noqa: BLE001
-            log.debug("seed record skipped: %s", exc)
-    for scenario in ("structuring", "shared_counterparty", "turnover", "account_takeover"):
-        try:
-            inject(db, tenant.id, scenario, actor="demo-seed", at=stop - timedelta(minutes=rng.randint(15, 150)))
-        except Exception as exc:  # noqa: BLE001
-            log.warning("scenario %s failed: %s", scenario, exc)
-    _backdate(db, tenant.id)
-    if with_cases:
-        _sample_cases(db, tenant)
+                                              notes=f"Trained on the {days}-day historical import of the Demo "
+                                                    "workspace")
     channels = create_live_channels(db, tenant.id, actor) if settings.demo_live_channels else []
     audit.record(db, tenant.id, "demo.seed", actor=actor, resource_type="demo", space="DEMO",
-                 after={"customers": len(gen.customers) + 8, "history": len(history), "scored": n_live,
-                        "fraud_model": model.id, "segmentation": seg.id, "live_channels": channels,
+                 after={"customers": len(gen.customers) + 8, "history": n_hist, "fraud_model": model.id,
+                        "segmentation": seg.id, "live_channels": channels,
                         "seconds": round(time.time() - started, 1)})
-    if settings.background_jobs:
-        from .connectors import start_enabled
-        start_enabled(db)
-    return {"customers": len(gen.customers) + 8, "history": len(history), "scored": n_live, "model": model.id,
-            "segmentation": seg.id, "live_channels": channels}
+    if with_cases:
+        _sample_cases(db, tenant)
+    return {"customers": len(gen.customers) + 8, "history": n_hist, "scored": 0, "model": model.id,
+            "segmentation": seg.id, "live_channels": channels,
+            "next_step": "Sign in as IT Admin and start a channel in Integrations & Channels to stream transactions"}
 
 
 INCOMING_COLUMNS = ["transaction_id", "customer_id", "timestamp", "transaction_type", "amount", "currency", "channel",
@@ -194,31 +194,42 @@ def incoming_file() -> str:
 
 
 def create_live_channels(db: Session, tenant_id: str, actor: str = "system") -> list[dict]:
-    """Ready-to-use live channels for the Demo workspace; every record they receive is scored in real time."""
+    """Ready-to-use live channels for the Demo workspace (tested, not started).
+
+    The IT Admin starts them from Integrations & Channels; every record they then receive is scored in real time.
+    """
     from .connectors import add_log, test_connection
 
     bind = "0.0.0.0" if settings.host == "0.0.0.0" else "127.0.0.1"
     specs = [
-        ("Live payment stream (synthetic payment switch)", "demo_stream", "PRE_AUTH",
-         {"rate": settings.demo_stream_rate, "fraud_ratio": 0.04, "poll_seconds": 2}),
+        ("Payment gateway simulator (mobile, internet banking, branch, ATM)", "demo_stream", "PRE_AUTH",
+         {"speed": settings.demo_stream_speed, "fraud_ratio": 0.03, "poll_seconds": 2}),
         ("TCP JSON-lines feed", "tcp_json", "POST_EVENT", {"host": bind, "port": settings.demo_tcp_port}),
         ("HTTP webhook listener", "http_listener", "POST_EVENT",
          {"host": bind, "port": settings.demo_http_port, "path": "/transactions"}),
         ("CSV drop file", "file_drop", "POST_EVENT", {"path": incoming_file(), "follow": True, "poll_seconds": 1}),
+        ("Fraud engine results database", "db_results", "POST_EVENT",
+         {"url": "sqlite:///" + (settings.data_dir / "fraud_results_demo.db").as_posix(), "table": "fraud_results",
+          "batch": 500, "poll_seconds": 2}),
     ]
     out = []
+    existing = {t for (t,) in db.execute(select(Connector.type).where(Connector.tenant_id == tenant_id,
+                                                                      Connector.space == "DEMO"))}
     for name, ctype, mode, cfg in specs:
-        c = Connector(tenant_id=tenant_id, space="DEMO", name=name, type=ctype, direction="INBOUND", environment="DEV",
-                      ingest_mode=mode, config=cfg, auth_method="NONE" if ctype in ("demo_stream", "file_drop")
-                      else "NETWORK_ALLOWLIST", owner=actor, created_by=None,
-                      data_scope="Live channel of the Demo workspace (scored in real time)")
+        if ctype in existing:
+            continue
+        c = Connector(tenant_id=tenant_id, space="DEMO", name=name, type=ctype, environment="DEV",
+                      ingest_mode=mode, config=cfg,
+                      auth_method="NONE" if ctype in ("demo_stream", "file_drop", "db_results")
+                      else "NETWORK_ALLOWLIST", direction="OUTBOUND" if ctype == "db_results" else "INBOUND", owner=actor, created_by=None,
+                      data_scope="Decision results of the Demo workspace" if ctype == "db_results" else
+                      "Live channel of the Demo workspace (scored in real time)")
         db.add(c)
         db.flush()
         add_log(db, c, "Created automatically for Demo Mode", actor=actor)
         res = test_connection(db, c, actor)
         if res["ok"]:
-            c.status = "ENABLED"
-            add_log(db, c, "Enabled automatically - data received here is scored live", actor=actor)
+            add_log(db, c, "Ready - an IT Admin starts the channel to stream data into the engine", actor=actor)
         out.append({"name": name, "type": ctype, "status": c.status, "detail": res["message"]})
     db.commit()
     return out
@@ -366,7 +377,7 @@ def inject(db: Session, tenant_id: str, scenario: str, customer_ref: Optional[st
     records = _restamp(_scenario_records(gen, scenario, persona, rng, at), at)
     out = []
     for r in records:
-        r["channel"] = rng.choice(CHANNELS[:4])
+        r.setdefault("channel", rng.choice(CHANNELS[:4]))
         dec, tx, _ = evaluate(db, tenant_id, "DEMO", r, mode=mode, source=f"Demo scenario: {scenario}",
                               caller=actor)
         out.append({"transaction_id": dec.tx_ref, "customer_id": dec.customer_ref, "amount": tx.amount,
@@ -375,23 +386,113 @@ def inject(db: Session, tenant_id: str, scenario: str, customer_ref: Optional[st
     return out
 
 
-def live_records(tenant_id: str, fraud_ratio: float = 0.04) -> Iterator[dict]:
-    """Endless synthetic stream for the demo_stream connector (timestamps = now)."""
-    from ..db import SessionLocal
-    with SessionLocal() as db:
-        tenant = db.get(Tenant, tenant_id)
-        p = _params(tenant)
-        currency = tenant.base_currency
-    gen = TransactionGenerator(p["customers"], banks={tenant_id: "PS"}, seed=p["seed"], fraud_ratio=fraud_ratio,
-                               currency=currency, start=utcnow())
-    stream = gen.live(fraud_ratio)
-    rng = random.Random()
+def _tz(tenant: Tenant):
+    try:
+        from zoneinfo import ZoneInfo
+        return ZoneInfo(tenant.timezone or "UTC")
+    except Exception:  # noqa: BLE001 - unknown zone / no tz database
+        return None
+
+
+def local_to_utc(ts: datetime, tz) -> datetime:
+    """The simulation runs on the bank's local clock; the database stores UTC."""
+    if tz is None:
+        return ts
+    from datetime import timezone as _tzmod
+    return ts.replace(tzinfo=tz).astimezone(_tzmod.utc).replace(tzinfo=None)
+
+
+def local_today(tz) -> datetime:
+    from datetime import timezone as _tzmod
+    now = datetime.now(_tzmod.utc)
+    local = now.astimezone(tz) if tz is not None else now
+    return local.replace(tzinfo=None, hour=0, minute=0, second=0, microsecond=0)
+
+
+class GatewaySimulator:
+    """Realistic payment-gateway feed for the Demo workspace.
+
+    Each customer transacts on his own simulated schedule (working-hours peaks, quiet Fridays, salary week) and
+    every record carries its *simulated* timestamp, so per-customer behaviour stays realistic. Records are
+    released on the wall clock: from ``start`` (default: yesterday 00:00 local, where the historical import ends)
+    the simulator first catches up at ``speed`` x real time, then continues in real time - timestamps are never in
+    the future.
+    """
+
+    def __init__(self, tenant_id: str, fraud_ratio: float = 0.03, speed: float = 60.0,
+                 start: Optional[datetime] = None, allow_future: bool = False):
+        from ..db import SessionLocal
+        with SessionLocal() as db:
+            tenant = db.get(Tenant, tenant_id)
+            p = _params(tenant)
+            currency = tenant.base_currency
+            self.tz = _tz(tenant)
+        day0 = local_today(self.tz) - timedelta(days=1)
+        start_utc = max(start or datetime.min, local_to_utc(day0, self.tz))
+        self.gen = TransactionGenerator(p["customers"], banks={tenant_id: "PS"}, seed=p["seed"],
+                                        fraud_ratio=fraud_ratio, currency=currency, start=day0)
+        self.stream = self.gen.live(fraud_ratio)
+        self.speed = max(1.0, float(speed))
+        self.allow_future = allow_future
+        self.sim_start = start_utc
+        self.wall_start = utcnow()
+        self.rng = random.Random()
+        self.pending: Optional[dict] = None
+        self.cursor = start_utc
+        self._last_ts: Optional[datetime] = None
+        self._last_release = self.wall_start
+
+    def _next(self) -> dict:
+        while True:
+            record = next(self.stream)
+            ts = local_to_utc(datetime.fromisoformat(str(record["timestamp"])), self.tz)
+            if ts < self.sim_start:
+                continue                          # resume after the last streamed transaction
+            record["timestamp"] = ts.isoformat(sep=" ", timespec="seconds")
+            record["tx_id"] = f"GW-{self.rng.getrandbits(40):010X}"
+            record.setdefault("channel", self.rng.choice(CHANNELS))
+            record["gateway"] = "Payment gateway simulator"
+            return record
+
+    MAX_GAP = timedelta(minutes=5)          # quiet periods (nights) are compressed during catch-up
+
+    def release_at(self, ts: datetime) -> datetime:
+        gap = min(ts - (self._last_ts or self.sim_start), self.MAX_GAP)
+        accelerated = self._last_release + max(gap, timedelta(0)) / self.speed
+        return max(accelerated, ts)
+
+    def due(self, limit: int = 500) -> list[dict]:
+        """Records whose release time has come."""
+        out, now = [], utcnow()
+        while len(out) < limit:
+            rec = self.pending or self._next()
+            ts = datetime.fromisoformat(rec["timestamp"])
+            release = self.release_at(ts)
+            if not self.allow_future and release > now:
+                self.pending = rec
+                break
+            self.pending = None
+            self.cursor = ts
+            self._last_ts, self._last_release = ts, release
+            out.append(rec)
+        return out
+
+    def take(self, n: int) -> list[dict]:
+        """Next ``n`` records regardless of the clock (tests and bulk loading)."""
+        out = []
+        for _ in range(n):
+            rec = self.pending or self._next()
+            self.pending = None
+            self.cursor = datetime.fromisoformat(rec["timestamp"])
+            out.append(rec)
+        return out
+
+
+def live_records(tenant_id: str, fraud_ratio: float = 0.03) -> Iterator[dict]:
+    """Endless realistic stream in simulated time from yesterday 00:00 (local)."""
+    sim = GatewaySimulator(tenant_id, fraud_ratio, allow_future=True)
     while True:
-        record = next(stream)
-        record["timestamp"] = utcnow().isoformat(sep=" ", timespec="seconds")
-        record["tx_id"] = f"STR-{rng.getrandbits(36):09X}"
-        record["channel"] = rng.choice(CHANNELS)
-        yield record
+        yield from sim.take(50)
 
 
 # --------------------------------------------------------------------------- reset
@@ -428,3 +529,22 @@ def reset(db: Session, tenant_id: str, actor, reseed: bool = True) -> dict:
 def has_demo_data(db: Session, tenant_id: str) -> bool:
     return db.execute(select(Customer.id).where(Customer.tenant_id == tenant_id, Customer.space == "DEMO")
                       .limit(1)).scalar() is not None
+
+
+def pump(db: Session, tenant_id: str, n: int, fraud_ratio: float = 0.03, mode: str = "PRE_AUTH",
+         source: str = "Payment gateway simulator", until_now: bool = False) -> int:
+    """Push gateway-simulator transactions through the live decision pipeline (tests / CLI).
+
+    ``until_now`` stops at the current time (realistic); otherwise ``n`` records are taken in simulated time
+    from yesterday 00:00, which may run past the current time for large ``n``.
+    """
+    sim = GatewaySimulator(tenant_id, fraud_ratio, speed=1e9, allow_future=not until_now)
+    records = sim.due(n) if until_now else sim.take(n)
+    done = 0
+    for record in records:
+        try:
+            evaluate(db, tenant_id, "DEMO", record, mode=mode, source=source, caller="gateway-simulator")
+            done += 1
+        except Exception as exc:  # noqa: BLE001
+            log.debug("pump record skipped: %s", exc)
+    return done

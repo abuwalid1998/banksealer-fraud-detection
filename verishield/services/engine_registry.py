@@ -7,11 +7,12 @@ tenants never share training data or models, and Demo Mode has its own namespace
 """
 from __future__ import annotations
 
+import copy
 import logging
 import os
 import pickle
 import threading
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional
 
 from sqlalchemy import func, select, update
@@ -64,8 +65,12 @@ def base_config() -> Config:
     return _BASE_CONFIG.copy()
 
 
-def config_for(thresholds: dict, tenant_id: str, tenant_name: str = "") -> Config:
+def config_for(thresholds: dict, tenant_id: str, tenant_name: str = "", space: Optional[str] = None,
+               params: Optional[dict] = None) -> Config:
+    """Engine configuration = bundled defaults + IT Admin parameter overrides (per workspace) + policy thresholds."""
+    from . import model_ops
     cfg = base_config()
+    model_ops.merge_into(cfg.data, params if params is not None else model_ops.cached(tenant_id, space))
     merged = dict(cfg.data.get("thresholds", {}))
     merged.update(thresholds or {})
     cfg.data["thresholds"] = merged
@@ -105,6 +110,7 @@ class Workspace:
         self.shadow: Optional[BankSealerEngine] = None
         self.shadow_id: Optional[str] = None
         self.policy_id: Optional[str] = None
+        self.params: dict = {}             # parameter overrides the active model was trained with
         self.scored_since_save = 0
         self.last_error = ""
 
@@ -116,7 +122,7 @@ class Workspace:
         with self.lock:
             if self.policy_id == policy_id:
                 return
-            cfg = config_for(thresholds, self.tenant_id, tenant_name)
+            cfg = config_for(thresholds, self.tenant_id, tenant_name, self.space, self.params)
             for eng in (self.engine, self.shadow):
                 if eng is not None:
                     eng.apply_config(cfg)
@@ -181,7 +187,9 @@ def load_active_models(db: Session) -> None:
         tenant = db.get(Tenant, mv.tenant_id)
         policy = active_policy(db, mv.tenant_id)
         ws = workspace(mv.tenant_id, mv.space)
-        cfg = config_for(policy.document.get("engine_thresholds", {}), mv.tenant_id, tenant.display_name)
+        params = (mv.metrics or {}).get("parameter_overrides") or {}
+        cfg = config_for(policy.document.get("engine_thresholds", {}), mv.tenant_id, tenant.display_name, mv.space,
+                         params)
         try:
             state = ws.state_path(mv.id)
             path = state if (mv.status == "ACTIVE" and os.path.exists(state)) else mv.artifact_path
@@ -192,7 +200,7 @@ def load_active_models(db: Session) -> None:
             continue
         with ws.lock:
             if mv.status == "ACTIVE":
-                ws.engine, ws.model_id = eng, mv.id
+                ws.engine, ws.model_id, ws.params = eng, mv.id, params
             else:
                 ws.shadow, ws.shadow_id = eng, mv.id
             ws.policy_id = policy.id
@@ -214,15 +222,21 @@ def training_rows(db: Session, tenant_id: str, space: str, limit: int = 250_000)
 
 
 def train_fraud_model(db: Session, tenant_id: str, space: str, actor: str = "system", activate: bool = True,
-                      shadow: bool = False, notes: str = "") -> ModelVersion:
+                      shadow: bool = False, notes: str = "", params: Optional[dict] = None,
+                      window_days: Optional[int] = None) -> ModelVersion:
+    from . import model_ops
     from .policy import active_policy
 
     tenant = db.get(Tenant, tenant_id)
     policy = active_policy(db, tenant_id)
     rows = training_rows(db, tenant_id, space)
+    if window_days:
+        cutoff = utcnow() - timedelta(days=int(window_days))
+        rows = [r for r in rows if r.ts >= cutoff]
     if len(rows) < 50:
         raise ValueError(f"not enough eligible transactions to train ({len(rows)}); import history first")
-    cfg = config_for(policy.document.get("engine_thresholds", {}), tenant_id, tenant.display_name)
+    used = params if params is not None else model_ops.overrides(tenant, space)
+    cfg = config_for(policy.document.get("engine_thresholds", {}), tenant_id, tenant.display_name, space, used)
     eng = BankSealerEngine(cfg)
     txs = [to_engine(r) for r in rows]
     eng.fit(txs)
@@ -252,6 +266,10 @@ def train_fraud_model(db: Session, tenant_id: str, space: str, actor: str = "sys
         "tx_types": {k: sum(1 for t in txs if t.tx_type == k) for k in {t.tx_type for t in txs}},
         "policy_version": policy.id,
         "profile_weights": cfg.section("engine").get("profile_weights"),
+        "hyperparameters": {s: copy.deepcopy(cfg.section(s)) for s in ("engine", "local", "temporal", "global")},
+        "parameter_overrides": used,
+        "training_window_days": window_days,
+        "training_eligibility": "historical import + scored transactions decided PASS, excluding confirmed fraud",
     }
     mv = ModelVersion(id=model_id, tenant_id=tenant_id, space=space, kind="FRAUD", seq=seq, status="TRAINED",
                       artifact_path=path, metrics=metrics,
@@ -277,7 +295,8 @@ def activate_model(db: Session, model_id: str, actor: str = "system") -> ModelVe
         raise LookupError(model_id)
     tenant = db.get(Tenant, mv.tenant_id)
     policy = active_policy(db, mv.tenant_id)
-    cfg = config_for(policy.document.get("engine_thresholds", {}), mv.tenant_id, tenant.display_name)
+    cfg = config_for(policy.document.get("engine_thresholds", {}), mv.tenant_id, tenant.display_name, mv.space,
+                     (mv.metrics or {}).get("parameter_overrides"))
     eng = _load_engine(mv.artifact_path, cfg)
     ws = workspace(mv.tenant_id, mv.space)
     with ws.lock:
@@ -293,6 +312,7 @@ def activate_model(db: Session, model_id: str, actor: str = "system") -> ModelVe
         mv.approved_by = actor
         db.commit()
         ws.engine, ws.model_id, ws.policy_id = eng, model_id, policy.id
+        ws.params = (mv.metrics or {}).get("parameter_overrides") or {}
     return mv
 
 
@@ -307,7 +327,8 @@ def set_shadow(db: Session, model_id: str, actor: str = "system") -> ModelVersio
     tenant = db.get(Tenant, mv.tenant_id)
     policy = active_policy(db, mv.tenant_id)
     eng = _load_engine(mv.artifact_path, config_for(policy.document.get("engine_thresholds", {}), mv.tenant_id,
-                                                    tenant.display_name))
+                                                    tenant.display_name, mv.space,
+                                                    (mv.metrics or {}).get("parameter_overrides") or {}))
     ws = workspace(mv.tenant_id, mv.space)
     with ws.lock:
         db.execute(update(ModelVersion).where(ModelVersion.tenant_id == mv.tenant_id, ModelVersion.space == mv.space,

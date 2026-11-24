@@ -2,7 +2,7 @@
 import { api } from "../api.js";
 import { navigate } from "../app.js";
 import { COLORS, S, card, chip, codes, decisionChip, donut, empty, esc, fmtDate, fmtMoney, fmtNum, fmtRel, hbars,
-  kpi, label, live, liveBadge, stackedBars, table } from "../ui.js";
+  icon, kpi, label, live, liveBadge, stackedBars, table, trendChart } from "../ui.js";
 
 const OUT = ["PASS", "REVIEW", "HOLD", "DECLINE", "ERROR_POLICY"];
 
@@ -13,9 +13,17 @@ export async function render(el) {
     const hello = `<div class="row" style="margin-bottom:16px"><div><h2 style="font-size:18px">Welcome, ${esc(S.me.user.first_name || S.me.user.name)}</h2>
       <div class="muted small">${esc(S.me.user.role_label)} workspace · ${d.space === "DEMO" ? "Demo workspace (live scoring, simulated payment actions)" : "Live workspace"} · ${liveBadge("AUTO-REFRESH")} updated ${fmtDate(d.generated_at, { seconds: true })}</div></div>
       <span class="spacer"></span><span class="small muted">Policy <b>${esc(d.models_summary.policy || "–")}</b> · Fraud model <b>${esc(d.models_summary.fraud || "not trained")}</b></span></div>`;
-    if (role === "IT_ADMIN") el.innerHTML = hello + itAdmin(d);
+    const pulse = await api.get("/live/pulse").catch(() => ({}));
+    const idle = !pulse.channels_running && !pulse.decisions_last_5_minutes;
+    const hint = idle && role !== "AML_EMPLOYEE" ? `<div class="hero" style="margin-bottom:16px"><div style="flex:1;min-width:260px;position:relative;z-index:1">
+        <h2>${role === "IT_ADMIN" ? "Start a channel to stream transactions" : "Waiting for live transactions"}</h2>
+        <p>${role === "IT_ADMIN" ? "No channel is streaming. Start the payment gateway (or the simulator in Demo Mode) under Integrations & Channels; every transaction is scored as it arrives and written to the results database."
+          : "No channel is streaming right now. Scores, alerts and figures update automatically as soon as the IT Admin starts a channel."}</p></div>
+        ${role === "IT_ADMIN" ? `<a href="#" data-go="#/integrations" class="btn teal">${icon("play")} Open Integrations &amp; Channels</a>` : ""}</div>` : "";
+    if (role === "IT_ADMIN") el.innerHTML = hello + hint + itAdmin(d);
     else if (role === "AML_EMPLOYEE") el.innerHTML = hello + employee(d);
-    else el.innerHTML = hello + manager(d, role === "CHIEF_AML");
+    else if (role === "CEO") el.innerHTML = hello + hint + executive(d);
+    else el.innerHTML = hello + hint + manager(d, role === "CHIEF_AML");
     el.querySelectorAll("[data-go]").forEach((a) => a.addEventListener("click", (e) => { e.preventDefault(); navigate(a.dataset.go); }));
   };
   await draw();
@@ -151,3 +159,41 @@ function itAdmin(d) {
 }
 
 export { codes };
+
+function executive(d) {
+  const k = d.kpis, sys = d.system, cur = S.me.tenant.currency;
+  const big = (v) => Math.abs(v) >= 1e6 ? `${(v / 1e6).toFixed(2)}M` : Math.abs(v) >= 1e4 ? `${(v / 1e3).toFixed(1)}K` : fmtNum(v);
+  return `<div class="exec-grid">
+    ${kpi("Transactions scored (30d)", fmtNum(k.transactions), `${fmtNum(k.transactions_24h)} in the last 24h`, "accent")}
+    ${kpi("Value scored (30d)", `${big(k.value)} <span style="font-size:13px;color:var(--muted)">${esc(cur)}</span>`, `${big(k.value_24h)} ${esc(cur)} in 24h`)}
+    ${kpi("Value protected", `${big(k.protected_value)} <span style="font-size:13px;color:var(--muted)">${esc(cur)}</span>`, "held or declined before execution", k.protected_value ? "warn" : "")}
+    ${kpi("Intervention rate", `${k.intervention_rate.toFixed(2)}%`, "review, hold or decline")}
+    ${kpi("Alerts open", fmtNum(k.alerts_open), `${fmtNum(k.alerts_period)} raised in 30 days`, k.alerts_open ? "warn" : "")}
+    ${kpi("AML cases open", fmtNum(k.cases_open), `${fmtNum(k.cases_breached)} past due · ${fmtNum(k.escalations)} escalated`, k.cases_breached ? "crit" : "")}
+    ${kpi("Customers", fmtNum(k.customers), `${fmtNum(k.customers_active)} active · ${fmtNum(k.customers_high_risk)} high risk`)}
+    ${kpi("Platform", sys.decision_service_ready ? chip("OPERATIONAL", "ok") : chip("DEGRADED", "crit"), `${sys.channels_running}/${sys.channels_total} channels streaming · ${sys.open_incidents} open incidents`)}
+  </div>
+  <div class="grid g-21" style="margin-top:16px">
+    ${card("Daily transactions and interventions – 30 days", trendChart(d.trend, { key: "count", key2: "interventions" }) + '<div class="legend" style="margin-top:6px"><span><i style="background:#3569C8"></i>Transactions</span><span><i style="background:#E8A33A"></i>Interventions (dashed)</span></div>')}
+    ${card("Decision mix", donut(["PASS", "REVIEW", "HOLD", "DECLINE", "ERROR_POLICY"].map((x) => ({ label: label(x), value: d.decisions[x] || 0, color: COLORS[x] })).filter((x) => x.value), { centerLabel: "decisions" }))}
+  </div>
+  <div class="grid g3" style="margin-top:16px">
+    ${card("By channel", hbars(d.by_channel.map((c) => ({ label: label(c.channel), value: c.count }))))}
+    ${card("By product", hbars(d.by_type.map((c) => ({ label: label(c.type), value: c.count, color: "#0BAA9B" }))))}
+    ${card("By city", hbars(d.by_city.map((c) => ({ label: c.city, value: c.count, color: "#5B3D8C" }))))}
+  </div>
+  <div class="grid g3" style="margin-top:16px">
+    ${card("Customer risk (institution rating)", donut(["LOW", "MEDIUM", "HIGH"].map((r) => ({ label: label(r), value: d.customer_risk[r] || 0, color: COLORS[r === "HIGH" ? "DECLINE" : r] })).filter((x) => x.value), { centerLabel: "customers" }))}
+    ${card("Customers by segment", hbars(d.segments.map((x) => ({ label: x.segment, value: x.customers, color: "#3569C8" }))), { actions: '<a href="#" data-go="#/clusters" class="btn sm">Clusters</a>' })}
+    ${card("Open alerts by severity", hbars(["CRITICAL", "HIGH", "MEDIUM", "LOW"].map((x) => ({ label: label(x), value: d.alerts_by_severity[x] || 0, color: COLORS[x] }))))}
+  </div>
+  <div class="grid g2" style="margin-top:16px">
+    ${card("Customers with the most interventions", table([{ label: "Customer", render: (r) => `<a href="#/customers/${encodeURIComponent(r.customer_ref)}">${esc(r.customer_ref)}</a>` },
+      { label: "Name", key: "name" }, { label: "Interventions", key: "interventions", num: true }, { label: "Highest score", num: true, render: (r) => Number(r.max_score).toFixed(2) }],
+      d.top_risk_customers.filter((r) => r.interventions), { empty: "No interventions in the period." }), { flush: true })}
+    ${card("Board reports", `<p class="small">Generate formal, institution-branded PDF / Excel reports on the platform, transactions and customers:</p>
+      <ul class="small" style="padding-left:18px"><li>Board report – fraud, AML &amp; platform overview</li><li>Transaction activity report</li><li>Customer portfolio report</li><li>Executive fraud &amp; AML overview, model health, channel health</li></ul>
+      <a href="#" data-go="#/reports" class="btn primary">${icon("reports")} Open reports</a>
+      <p class="tiny muted" style="margin-top:10px">Platform: decision latency p50 ${sys.decision_p50_ms ?? "–"} ms · p95 ${sys.decision_p95_ms ?? "–"} ms · model ${esc(sys.active_model || "–")}</p>`)}
+  </div>`;
+}

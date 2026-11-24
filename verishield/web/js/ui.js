@@ -66,6 +66,14 @@ const P = {
   play: "M7 4v16l13-8z", stop: "M6 6h12v12H6z", check: "m5 12 5 5L20 7", menu: "M4 6h16M4 12h16M4 18h16",
   empty: "M3 7h18v13H3zM3 7l3-4h12l3 4M9 12h6",
   user: "M20 21v-1a5 5 0 0 0-5-5H9a5 5 0 0 0-5 5v1M12 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8z",
+  clusters: "M7 8a3 3 0 1 0 0-.01M17 7a2 2 0 1 0 0-.01M15 17a3.5 3.5 0 1 0 0-.01M6 18a1.5 1.5 0 1 0 0-.01",
+  notifications: "M4 6h16v12H4zM4 7l8 6 8-6",
+  agents: "M12 3v3M8 6h8a3 3 0 0 1 3 3v6a3 3 0 0 1-3 3H8a3 3 0 0 1-3-3V9a3 3 0 0 1 3-3zM9.5 11v1.5M14.5 11v1.5M3 11v3M21 11v3",
+  database: "M4 6c0 1.7 3.6 3 8 3s8-1.3 8-3-3.6-3-8-3-8 1.3-8 3zm0 0v12c0 1.7 3.6 3 8 3s8-1.3 8-3V6M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3",
+  key: "M15 7a4 4 0 1 1-3.9 5H3v3h3v2h3v-2h2.1A4 4 0 0 1 15 7z",
+  heart: "M12 20s-7-4.4-7-10a4 4 0 0 1 7-2.6A4 4 0 0 1 19 10c0 5.6-7 10-7 10z",
+  sliders: "M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3M1 14h6M9 8h6M17 16h6",
+  shield: "M12 3 4 7v6c0 4.4 3.4 7.6 8 8.5 4.6-.9 8-4.1 8-8.5V7z",
 };
 export function icon(name, extra = "") {
   return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" ${extra}><path d="${P[name] || P.empty}"/></svg>`;
@@ -276,4 +284,65 @@ export function live(el, ms, fn) {
 }
 export function liveBadge(text = "LIVE") {
   return `<span class="livepill"><i></i>${esc(text)}</span>`;
+}
+
+// ---------- switches ----------
+export function toggle(name, checked, labelText = "", { id = "" } = {}) {
+  return `<label class="switch" ${id ? `id="${id}"` : ""}><input type="checkbox" name="${esc(name)}" ${checked ? "checked" : ""}><span class="track"><i></i></span>${labelText ? `<span>${esc(labelText)}</span>` : ""}</label>`;
+}
+export function statusDot(ok, text) {
+  return `<span class="sdot ${ok ? "on" : "off"}"><i></i>${esc(text)}</span>`;
+}
+
+// ---------- scatter plot (clusters) ----------
+// points: [{x, y, group, label, size?, ring?}] ; groups: {key: {label, color}}
+export function scatter(points, groups, { height = 380, centers = [], onPoint } = {}) {
+  if (!points.length) return empty("No points to plot.");
+  const W = 760, H = height, pad = 26;
+  const xs = points.map((p) => p.x), ys = points.map((p) => p.y);
+  const q = (arr, f) => { const s = [...arr].sort((a, b) => a - b); return s[Math.min(s.length - 1, Math.max(0, Math.round(f * (s.length - 1))))]; };
+  // robust bounds so a few extreme outliers do not squash the clusters
+  let x0 = q(xs, 0.01), x1 = q(xs, 0.99), y0 = q(ys, 0.01), y1 = q(ys, 0.99);
+  const dx = (x1 - x0) || 1, dy = (y1 - y0) || 1;
+  x0 -= dx * 0.12; x1 += dx * 0.12; y0 -= dy * 0.12; y1 += dy * 0.12;
+  const sx = (v) => pad + ((Math.min(Math.max(v, x0), x1) - x0) / (x1 - x0)) * (W - 2 * pad);
+  const sy = (v) => H - pad - ((Math.min(Math.max(v, y0), y1) - y0) / (y1 - y0)) * (H - 2 * pad);
+  const grid = [0.25, 0.5, 0.75].map((f) => `<line x1="${pad}" x2="${W - pad}" y1="${pad + f * (H - 2 * pad)}" y2="${pad + f * (H - 2 * pad)}" stroke="var(--grid)"/><line y1="${pad}" y2="${H - pad}" x1="${pad + f * (W - 2 * pad)}" x2="${pad + f * (W - 2 * pad)}" stroke="var(--grid)"/>`).join("");
+  const dots = points.map((p, i) => {
+    const g = groups[p.group] || { color: "#9AA8B9" };
+    const clipped = p.x < x0 || p.x > x1 || p.y < y0 || p.y > y1;
+    return `<circle data-i="${i}" cx="${sx(p.x).toFixed(1)}" cy="${sy(p.y).toFixed(1)}" r="${p.size || 4}" fill="${g.color}" fill-opacity="${p.ring ? 0.95 : 0.7}" stroke="${p.ring ? "#C84B55" : "#fff"}" stroke-width="${p.ring ? 2 : 0.8}" ${clipped ? 'stroke-dasharray="2 1"' : ""}><title>${esc(p.label)}</title></circle>`;
+  }).join("");
+  const cs = centers.map((c) => { const g = groups[c.group] || {}; return `<g transform="translate(${sx(c.x)},${sy(c.y)})"><path d="M-7 0H7M0 -7V7" stroke="${g.color || "#10233F"}" stroke-width="3"/><circle r="10" fill="none" stroke="${g.color || "#10233F"}" stroke-width="1.5"/><text y="-13" text-anchor="middle" style="font-weight:700;fill:var(--ink)">${esc(c.label || "")}</text></g>`; }).join("");
+  const legend = `<div class="legend">${Object.entries(groups).map(([k, g]) => `<span><i style="background:${g.color}"></i>${esc(g.label)}</span>`).join("")}</div>`;
+  const id = "sc" + Math.random().toString(36).slice(2, 8);
+  setTimeout(() => {
+    const svg = document.getElementById(id);
+    if (!svg || !onPoint) return;
+    svg.addEventListener("click", (e) => { const c = e.target.closest("circle[data-i]"); if (c) onPoint(points[+c.dataset.i]); });
+  });
+  return `<div class="chart scatter"><svg id="${id}" viewBox="0 0 ${W} ${H}" role="img">${grid}${dots}${cs}</svg>${legend}</div>`;
+}
+export const CLUSTER_COLORS = ["#3569C8", "#0BAA9B", "#E8A33A", "#5B3D8C", "#2E8B57", "#C84B55", "#10233F", "#D9730D", "#0E7490", "#8B5CF6", "#B45309", "#64748B"];
+
+// ---------- area / line trend with two series ----------
+export function trendChart(rows, { key = "count", key2 = null, labelKey = "day", height = 170, color = "#3569C8", color2 = "#E8A33A", fmt = (v) => fmtNum(v) } = {}) {
+  if (!rows.length) return empty("No data in this period.");
+  const W = 640, H = height, pad = { l: 44, r: 10, t: 10, b: 22 };
+  const max = Math.max(4, ...rows.map((r) => r[key] || 0));
+  const x = (i) => pad.l + (i * (W - pad.l - pad.r)) / Math.max(1, rows.length - 1);
+  const y = (v, m = max) => H - pad.b - ((v || 0) / m) * (H - pad.t - pad.b);
+  const line = rows.map((r, i) => `${i ? "L" : "M"}${x(i).toFixed(1)},${y(r[key]).toFixed(1)}`).join("");
+  const area = `${line}L${x(rows.length - 1)},${H - pad.b}L${x(0)},${H - pad.b}Z`;
+  let second = "";
+  if (key2) {
+    const m2 = Math.max(1, ...rows.map((r) => r[key2] || 0));
+    second = `<path d="${rows.map((r, i) => `${i ? "L" : "M"}${x(i).toFixed(1)},${y(r[key2], m2).toFixed(1)}`).join("")}" fill="none" stroke="${color2}" stroke-width="2" stroke-dasharray="5 3"/>`;
+  }
+  const grid = [0, 0.5, 1].map((f) => `<line x1="${pad.l}" x2="${W - pad.r}" y1="${y(f * max)}" y2="${y(f * max)}" stroke="var(--grid)"/><text x="${pad.l - 6}" y="${y(f * max) + 3}" text-anchor="end">${fmt(f * max)}</text>`).join("");
+  const step = Math.ceil(rows.length / 10);
+  const ticks = rows.map((r, i) => i % step === 0 ? `<text x="${x(i)}" y="${H - 6}" text-anchor="middle">${esc(String(r[labelKey]).slice(5))}</text>` : "").join("");
+  const dots = rows.map((r, i) => `<circle cx="${x(i)}" cy="${y(r[key])}" r="2.5" fill="${color}"><title>${esc(r[labelKey])}: ${fmt(r[key])}${key2 ? ` · ${esc(label(key2))}: ${fmtNum(r[key2])}` : ""}</title></circle>`).join("");
+  const gid = "g" + Math.random().toString(36).slice(2, 8);
+  return `<div class="chart"><svg viewBox="0 0 ${W} ${H}"><defs><linearGradient id="${gid}" x1="0" x2="0" y1="0" y2="1"><stop offset="0" stop-color="${color}" stop-opacity=".28"/><stop offset="1" stop-color="${color}" stop-opacity="0"/></linearGradient></defs>${grid}<path d="${area}" fill="url(#${gid})"/><path d="${line}" fill="none" stroke="${color}" stroke-width="2.2"/>${second}${dots}${ticks}</svg></div>`;
 }

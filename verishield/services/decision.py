@@ -22,7 +22,7 @@ from banksealer.preparation import TransactionPreparer, parse_timestamp
 
 from .. import audit
 from ..models import (Alert, Customer, Decision, DeadLetterEvent, ExecutionStatusEvent, SystemIncident, Tenant,
-                      Transaction, utcnow)
+                      Transaction, User, utcnow)
 from . import aml as aml_service
 from .common import space_ref
 from .engine_registry import engine_tx_fields, workspace
@@ -246,7 +246,22 @@ def _alert(db: Session, tx: Transaction, dec: Decision, explanation: str) -> Opt
                           f"{summary_codes or explanation[:120] or dec.decision}",
                   policy_version=dec.policy_version, model_version=dec.fraud_model_version)
     db.add(alert)
+    if severity == "CRITICAL":
+        _notify_critical(db, tx, alert)
     return alert
+
+
+def _notify_critical(db: Session, tx: Transaction, alert: Alert) -> None:
+    from . import notify
+    tenant = db.get(Tenant, tx.tenant_id)
+    if not notify.event_enabled(tenant, "critical_alert") or not (notify.email_ready(tenant) or
+                                                                  notify.sms_ready(tenant)):
+        return
+    for u in db.execute(select(User).where(User.tenant_id == tx.tenant_id, User.role.in_(("AML_MANAGER", "CHIEF_AML")),
+                                           User.status == "ACTIVE")).scalars():
+        notify.enqueue(tenant, "critical_alert", email=u.email, phone=u.phone,
+                       subject=f"CRITICAL alert {alert.id}" + (" (Demo workspace)" if tx.space == "DEMO" else ""),
+                       text=f"{alert.summary}. Customer {tx.customer_ref}, decision {alert.decision}.")
 
 
 def response(dec: Decision, tx: Optional[Transaction] = None) -> dict:
@@ -272,6 +287,20 @@ def response(dec: Decision, tx: Optional[Transaction] = None) -> dict:
 
 
 # --------------------------------------------------------------------------- evaluation
+DETAIL_FIELDS = ("beneficiary_name", "purpose", "narrative", "city", "branch", "merchant", "device", "gateway",
+                 "terminal_id")
+
+
+def _enrich(tx_row: Transaction, payload: dict) -> None:
+    """Keep descriptive payment-gateway fields (beneficiary name, purpose, city, device...) with the record."""
+    extra = {k: str(payload[k])[:120] for k in DETAIL_FIELDS if payload.get(k) not in (None, "")}
+    if extra:
+        tx_row.details = {**(tx_row.details or {}), **extra}
+    dev = payload.get("device_reference") or payload.get("device")
+    if dev and not tx_row.device_ref:
+        tx_row.device_ref = str(dev)[:64]
+
+
 def evaluate(db: Session, tenant_id: str, space: str, payload: dict, mode: str = "PRE_AUTH",
              source: str = "decision-api", caller: str = "", field_mapping: Optional[dict] = None,
              commit: bool = True) -> tuple[Decision, Transaction, bool]:
@@ -322,6 +351,7 @@ def evaluate(db: Session, tenant_id: str, space: str, payload: dict, mode: str =
                          account_ref=str(payload.get("account_reference") or ""),
                          device_ref=payload.get("device_reference"), **engine_tx_fields(etx))
     tx_row.channel = str(payload.get("channel") or "")
+    _enrich(tx_row, payload)
     dec = Decision(id=space_ref(db, tenant_id, space, "DEC", 7), tenant_id=tenant_id, space=space,
                    tx_ref=etx.tx_id, customer_ref=etx.user_id, idempotency_key=idem, mode=mode,
                    policy_version=policy.id, correlation_id=correlation, issued_at=now, caller=caller,
@@ -481,6 +511,7 @@ def store_history(db: Session, tenant_id: str, space: str, raw: dict, source: st
     _customer(db, tenant_id, space, etx.user_id)
     row = Transaction(tenant_id=tenant_id, space=space, tx_ref=etx.tx_id, mode="HISTORY", source=source,
                       channel=str(raw.get("channel") or ""), execution_state="SETTLED", **engine_tx_fields(etx))
+    _enrich(row, raw)
     db.add(row)
     db.flush()
     return True

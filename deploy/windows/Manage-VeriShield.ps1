@@ -132,6 +132,7 @@ switch ($Action) {
     }
     "Feed" {
         Write-Host "Streaming synthetic live transactions to the Demo TCP channel on port 9009 (Ctrl+C to stop)..."
+        Write-Host "The 'TCP JSON-lines feed' channel must be started first (Integrations & Channels > Start streaming)." -ForegroundColor Yellow
         Push-Location $AppDir
         try { & $VenvPy (Join-Path $AppDir "mock_channel\generate_transactions.py") --verishield --output tcp --port 9009 }
         finally { Pop-Location }

@@ -10,6 +10,7 @@ export async function render(el) {
       ["E-mail", `${esc(u.email)} ${u.email_verified ? chip("VERIFIED", "ok") : chip("UNVERIFIED", "neutral")}`], ["MFA", u.mfa_enabled ? chip("ENABLED", "ok") : chip("NOT ENABLED", "warn")]])}
       <form id="pf" class="form-grid" style="margin-top:14px"><label class="f">First name<input class="input" name="first_name" value="${esc(u.first_name)}" required></label>
       <label class="f">Last name<input class="input" name="last_name" value="${esc(u.last_name)}" required></label><label class="f">E-mail<input class="input" type="email" name="email" value="${esc(u.email)}" required></label>
+      <label class="f">Mobile (SMS codes)<input class="input" name="phone" value="${esc(u.phone || "")}" placeholder="+970 59 ..."></label>
       <div style="align-self:end"><button class="btn">Save profile</button></div></form>`)}
     ${card("Change password", `<form id="cp" class="stack" style="gap:10px"><label class="f">Current password<input class="input" type="password" name="current_password" autocomplete="current-password" required></label>
       <label class="f">New password<input class="input" type="password" name="new_password" autocomplete="new-password" required></label><button class="btn primary">Change password</button></form>`)}

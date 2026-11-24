@@ -1,8 +1,8 @@
 // Users & settings (IT Admin): users, institution & security policy, branding, API clients, Demo Mode.
 import { api } from "../api.js";
 import { refreshMe } from "../app.js";
-import { S, busy, card, chip, confirmDialog, errToast, esc, fmtDate, fmtRel, kv, label, loading, modal, options,
-  table, toast } from "../ui.js";
+import { S, busy, card, chip, confirmDialog, errToast, esc, fmtDate, fmtRel, icon, kv, label, loading, modal, options,
+  table, toast, toggle } from "../ui.js";
 
 const can = (p) => S.me.permissions.includes(p);
 
@@ -32,15 +32,15 @@ async function users(box) {
   const d = await api.get("/users");
   box.innerHTML = card("Users", table([
     { label: "Username", render: (u) => `<b class="mono">${esc(u.username)}</b>${u.is_bootstrap ? ' <span class="tiny muted">bootstrap</span>' : ""}` },
-    { label: "Name", render: (u) => esc(u.name) }, { label: "E-mail", render: (u) => `${esc(u.email)} ${u.email && !u.email_verified ? '<span class="tiny muted">(unverified)</span>' : ""}` },
+    { label: "Name", render: (u) => esc(u.name) }, { label: "E-mail / mobile", render: (u) => `${esc(u.email)} ${u.email && !u.email_verified ? '<span class="tiny muted">(unverified)</span>' : ""}${u.phone ? `<div class="tiny muted">${esc(u.phone)}</div>` : ""}` },
     { label: "Role", render: (u) => `${esc(u.role_label)}${u.extra_permissions.length ? `<div class="tiny muted">+ ${esc(u.extra_permissions.join(", "))}</div>` : ""}` },
     { label: "Status", render: (u) => chip(u.status) + (u.must_change_password ? ' <span class="tiny muted">password change pending</span>' : "") },
     { label: "MFA", render: (u) => u.mfa_enabled ? chip("ON", "ok") : chip("OFF", "neutral") },
     { label: "Last sign-in", render: (u) => u.last_login_at ? fmtRel(u.last_login_at) : "never" },
-    { label: "", render: (u) => `<div class="row nowrap"><button class="btn sm" data-edit="${u.id}">Edit</button>
+    { label: "", render: (u) => `<div class="row nowrap"><button class="btn sm" data-edit="${u.id}">Edit</button><button class="btn sm" data-reset="${u.id}" title="Reset password">${icon("key")} Reset password</button>
       <select class="input" data-act="${u.id}" style="width:auto;padding:4px 6px;font-size:12px"><option value="">Actions…</option>
       ${u.status === "DISABLED" ? '<option value="enable">Enable</option>' : '<option value="disable">Disable</option>'}${u.status === "LOCKED" ? '<option value="unlock">Unlock</option>' : ""}
-      <option value="reset-password">Reset password</option>${u.mfa_enabled ? '<option value="reset-mfa">Reset MFA</option>' : ""}</select></div>` },
+      ${u.mfa_enabled ? '<option value="reset-mfa">Reset MFA</option>' : ""}</select></div>` },
   ], d.users), { flush: true, actions: '<button class="btn primary" id="add">Create user</button>',
     sub: "Usernames are identifiers, not security factors. Temporary passwords are single-use and expire." });
   box.querySelector("#add").onclick = async () => {
@@ -49,10 +49,15 @@ async function users(box) {
         <label class="f">Role<select class="input" name="role">${options(d.roles.map((x) => [x.id, x.label]), "AML_EMPLOYEE")}</select></label>
         <label class="f">First name<input class="input" name="first_name" required></label><label class="f">Last name<input class="input" name="last_name" required></label>
         <label class="f">E-mail<input class="input" type="email" name="email" required></label>
-        <label class="f">Temporary password<span class="help">leave empty to generate a human-friendly one</span><input class="input" name="temporary_password" autocomplete="off"></label></div>`,
+        <label class="f">Mobile<span class="help">for SMS codes (optional)</span><input class="input" name="phone" placeholder="+970 59 ..."></label>
+        <label class="f">Temporary password<span class="help">leave empty to generate a human-friendly one</span><input class="input" name="temporary_password" autocomplete="off"></label></div>
+        <div class="row" style="margin-top:12px"><span class="small muted">Send the sign-in details to the user by</span>
+        <label class="check"><input type="checkbox" data-send="email"> e-mail</label><label class="check"><input type="checkbox" data-send="sms"> SMS</label></div>`,
       actions: [{ label: "Cancel" }, { label: "Create user", cls: "primary", onClick: (m) => { const v = {}; m.querySelectorAll("[name]").forEach((i) => (v[i.name] = i.value.trim()));
-        if (!v.temporary_password) delete v.temporary_password; return api.post("/users", v); } }] });
-    if (r) { await secretOnce(`Temporary password for ${r.user.username}`, r.temporary_password, r.note); users(box); }
+        if (!v.temporary_password) delete v.temporary_password;
+        v.send_credentials = [...m.querySelectorAll("[data-send]")].filter((c) => c.checked).map((c) => c.dataset.send);
+        return api.post("/users", v); } }] });
+    if (r) { await secretOnce(`Temporary password for ${r.user.username}`, r.temporary_password, r.note + deliveryText(r.delivery)); users(box); }
   };
   box.querySelectorAll("[data-edit]").forEach((b) => (b.onclick = async () => {
     const u = d.users.find((x) => x.id === b.dataset.edit);
@@ -60,13 +65,15 @@ async function users(box) {
     const r = await modal({ title: `Edit ${u.username}`, body: `<div class="form-grid">
         <label class="f">First name<input class="input" name="first_name" value="${esc(u.first_name)}"></label><label class="f">Last name<input class="input" name="last_name" value="${esc(u.last_name)}"></label>
         <label class="f">E-mail<input class="input" name="email" value="${esc(u.email)}"></label>
+        <label class="f">Mobile<input class="input" name="phone" value="${esc(u.phone || "")}"></label>
         <label class="f">Role<select class="input" name="role" ${u.id === S.me.user.id ? "disabled" : ""}>${options(d.roles.map((x) => [x.id, x.label]), u.role)}</select></label></div>
         ${grant.length ? `<h3 style="margin:14px 0 6px">Explicit additional permissions (audited)</h3>${grant.map((g) => `<label class="check"><input type="checkbox" data-grant="${g}" ${u.extra_permissions.includes(g) ? "checked" : ""}> ${esc(g)}</label>`).join("<br>")}` : ""}`,
       actions: [{ label: "Cancel" }, { label: "Save", cls: "primary", onClick: (m) => api.patch(`/users/${u.id}`, { first_name: m.querySelector("[name=first_name]").value,
-        last_name: m.querySelector("[name=last_name]").value, email: m.querySelector("[name=email]").value, role: m.querySelector("[name=role]").value,
+        last_name: m.querySelector("[name=last_name]").value, email: m.querySelector("[name=email]").value, phone: m.querySelector("[name=phone]").value, role: m.querySelector("[name=role]").value,
         extra_permissions: grant.length ? [...m.querySelectorAll("[data-grant]")].filter((c) => c.checked).map((c) => c.dataset.grant) : undefined }) }] });
     if (r) { toast("User updated"); users(box); }
   }));
+  box.querySelectorAll("[data-reset]").forEach((b) => (b.onclick = () => resetPassword(d.users.find((x) => x.id === b.dataset.reset), () => users(box))));
   box.querySelectorAll("[data-act]").forEach((s) => (s.onchange = async () => {
     const action = s.value; s.value = "";
     if (!action) return;
@@ -79,6 +86,35 @@ async function users(box) {
       users(box);
     } catch (e) { errToast(e); }
   }));
+}
+
+function deliveryText(delivery) {
+  const parts = Object.entries(delivery || {}).map(([k, v]) => `${k === "sms" ? "SMS" : "E-mail"}: ${v.sent ? "sent" : `not sent (${v.detail})`}`);
+  return parts.length ? ` ${parts.join(" · ")}.` : "";
+}
+
+async function resetPassword(u, done) {
+  const r = await modal({ title: `Reset password – ${u.username} ${u.name}`, body: `
+    <div class="stack" style="gap:12px">
+      <label class="check"><input type="radio" name="mode" value="generate" checked> Generate a temporary password</label>
+      <label class="check"><input type="radio" name="mode" value="set"> Set a specific password</label>
+      <label class="f hidden" id="pwbox">New password<span class="help">must meet the institution's password policy</span><input class="input" name="password" type="text" autocomplete="off"></label>
+      ${toggle("require_change", true, "User must change it at next sign-in")}
+      <div class="row"><span class="small muted">Send it to the user by</span>
+        <label class="check"><input type="checkbox" data-n="email" ${u.email ? "" : "disabled"}> e-mail ${u.email ? `<span class="tiny muted">${esc(u.email)}</span>` : ""}</label>
+        <label class="check"><input type="checkbox" data-n="sms" ${u.phone ? "" : "disabled"}> SMS ${u.phone ? `<span class="tiny muted">${esc(u.phone)}</span>` : '<span class="tiny muted">(no mobile)</span>'}</label></div>
+      <p class="tiny muted">Unlocks the account, ends its sessions and is recorded in the audit trail.</p></div>`,
+    onOpen: (m) => m.querySelectorAll("[name=mode]").forEach((x) => (x.onchange = () => m.querySelector("#pwbox").classList.toggle("hidden", m.querySelector("[name=mode]:checked").value !== "set"))),
+    actions: [{ label: "Cancel" }, { label: "Reset password", cls: "primary", onClick: (m) => {
+      const set = m.querySelector("[name=mode]:checked").value === "set";
+      return api.post(`/users/${u.id}/reset-password`, { password: set ? m.querySelector("[name=password]").value : undefined,
+        require_change: m.querySelector("[name=require_change]").checked,
+        notify: [...m.querySelectorAll("[data-n]")].filter((c) => c.checked).map((c) => c.dataset.n) });
+    } }] });
+  if (!r) return;
+  if (r.temporary_password) await secretOnce(`New password for ${u.username}`, r.temporary_password, r.note + deliveryText(r.delivery));
+  else toast(r.note + deliveryText(r.delivery), "ok", 7000);
+  done();
 }
 
 async function institution(box) {
@@ -108,6 +144,7 @@ async function institution(box) {
         <label class="check"><input type="checkbox" name="g.maker_checker" ${gov.maker_checker ? "checked" : ""}> Maker-checker for policy changes</label>
         <label class="f">Active AML Managers allowed<input class="input" type="number" min="1" name="l.AML_MANAGER" value="${esc(lim.AML_MANAGER ?? "")}"></label>
         <label class="f">Active Chiefs allowed<input class="input" type="number" min="1" name="l.CHIEF_AML" value="${esc(lim.CHIEF_AML ?? "")}"></label>
+        <label class="f">Active CEO accounts allowed<input class="input" type="number" min="1" name="l.CEO" value="${esc(lim.CEO ?? "")}"></label>
         <label class="f">Transactions retention (days)<input class="input" type="number" name="r.transactions_days" value="${esc(ret.transactions_days)}"></label>
         <label class="f">Cases retention (days)<input class="input" type="number" name="r.cases_days" value="${esc(ret.cases_days)}"></label>
         <label class="f">Audit retention (days)<input class="input" type="number" name="r.audit_days" value="${esc(ret.audit_days)}"></label></div>
@@ -136,17 +173,21 @@ async function branding(box) {
     ${card("Institution identity on reports", `<div class="form-grid">${field("display_name", "Display name")}${field("report_title_prefix", "Report title prefix")}${field("numbering_prefix", "Report numbering prefix")}
       ${field("primary_color", "Primary colour", "color")}${field("accent_color", "Accent colour", "color")}${field("secondary_color", "Secondary colour", "color")}
       ${field("locale", "Locale")}${field("date_format", "Date format (strftime)")}${field("page_number_format", "Page number format")}</div>`)}
-    ${card("Header, footer & notices", `<div class="form-grid">${field("header_text", "Header text")}${field("footer_text", "Footer text")}${field("confidentiality_notice", "Confidentiality notice")}
+    ${card("Header, footer & notices", `<div class="form-grid">${field("department", "Department line (report header)")}${field("classification", "Classification (e.g. CONFIDENTIAL)")}${field("footer_text", "Footer text")}${field("confidentiality_notice", "Confidentiality notice")}
       ${field("watermark", "Watermark (e.g. CONFIDENTIAL, DRAFT)")}${field("prepared_by_label", "Prepared-by label")}${field("reviewed_by_label", "Reviewed-by label")}${field("approved_by_label", "Approved-by label")}
       <label class="check"><input type="checkbox" name="signature_blocks" ${b.signature_blocks ? "checked" : ""}> Sign-off blocks</label></div>
       <label class="f" style="margin-top:10px">Mandatory disclaimer<textarea class="input" name="disclaimer">${esc(b.disclaimer)}</textarea></label>`)}
     <div><button class="btn primary">Save branding</button></div></form>
     <div class="stack">${card("Logo", `${S.me.tenant.logo || b.logo_key ? `<img src="/api/v1/public/logo/${esc(S.me.tenant.id)}?t=${Date.now()}" alt="logo" style="max-width:100%;max-height:90px;background:${esc(b.primary_color)};padding:10px;border-radius:8px">` : '<p class="muted small">No logo uploaded.</p>'}
       <form id="lf" class="stack" style="gap:8px;margin-top:10px"><input class="input" type="file" name="file" accept="image/png,image/jpeg" required><button class="btn">Upload PNG/JPEG</button></form>`)}
-      ${card("Preview", `<div style="border:1px solid var(--line);border-radius:8px;overflow:hidden"><div id="pv" style="background:${esc(b.primary_color)};color:#fff;padding:12px 14px;border-bottom:3px solid ${esc(b.accent_color)}"><b>${esc(b.display_name)}</b><div class="tiny" style="opacity:.8">${esc(b.header_text)}</div></div>
-        <div style="padding:14px;font-size:12px"><b style="color:${esc(b.primary_color)}">${esc(b.report_title_prefix)} Executive Fraud &amp; AML Overview</b><p class="muted">Report ${esc(b.numbering_prefix)}-2026-00042</p></div>
-        <div class="tiny muted" style="padding:8px 14px;border-top:1px solid var(--line)">${esc(b.confidentiality_notice)}<br>${esc(b.footer_text)}</div></div>
-        <p class="tiny muted" style="margin-top:8px">Generate any report to see the full branded PDF. AML report wording is maintained by the AML Manager (Reports page).</p>`)}</div></div>`;
+      ${card("Report preview", `<div style="border:1px solid var(--line);border-radius:8px;overflow:hidden;background:#fff">
+        <div style="height:6px;background:${esc(b.primary_color)};border-bottom:2px solid ${esc(b.accent_color)}"></div>
+        <div class="row" style="padding:12px 14px;align-items:flex-start">${S.me.tenant.logo ? `<img src="${esc(S.me.tenant.logo)}?t=${Date.now()}" style="max-height:34px;max-width:140px">` : `<b style="color:${esc(b.primary_color)};font-size:15px">${esc(b.display_name)}</b>`}
+          <span class="spacer"></span><div class="tiny muted right">${esc(b.legal_name || b.display_name)}<br>${esc(b.department || "")}</div></div>
+        <div style="padding:4px 14px 12px;font-size:12px;border-top:1px solid var(--line-2)"><div class="tiny" style="color:${esc(b.accent_color)};font-weight:700;margin-top:8px">REPORT</div>
+          <b style="color:${esc(b.primary_color)};font-size:14px">${esc(b.report_title_prefix)} Board Report – Fraud, AML &amp; Platform Overview</b><p class="muted tiny">Ref. ${esc(b.numbering_prefix)}-2026-00042</p></div>
+        <div class="tiny muted" style="padding:8px 14px;border-top:1px solid var(--line)"><b style="color:${esc(b.primary_color)}">${esc(b.classification || "CONFIDENTIAL")}</b> · Page 1 of 3<br>${esc(b.confidentiality_notice)}</div></div>
+        <p class="tiny muted" style="margin-top:8px">Reports carry only the institution's logo, name and colours. Upload the official logo (PNG with transparent background works best).</p>`)}</div></div>`;
   const f = box.querySelector("#bf");
   f.onsubmit = (e) => { e.preventDefault();
     const body = {};
@@ -187,7 +228,7 @@ async function demo(box) {
   const d = await api.get("/demo");
   box.innerHTML = `<div class="grid g2">
     ${card("Demo Mode", `${kv([["Status", d.demo_mode ? chip("ENABLED", "warn") : chip("DISABLED", "neutral")], ["Synthetic dataset", d.has_demo_data ? "present" : "not generated"]])}
-      <p class="small" style="margin-top:12px">Demo Mode switches every user's workspace to a separate Demo namespace (its own customers, transactions, models, channels, API keys and reports). Live data channels work in Demo Mode and every record is scored in real time; only outbound payment actions (release / reject sent to the bank) are simulated. A persistent banner and report watermark are shown.</p>
+      <p class="small" style="margin-top:12px">Demo Mode switches every user's workspace to a separate Demo namespace with its own customers (KYC), a historical transaction import and models trained on it. Nothing is pre-scored: the IT Admin starts channels under <a href="#/integrations">Integrations &amp; Channels</a> and every transaction they deliver is scored live and written to the results database. Only outbound payment actions are simulated. A banner and report watermark are shown.</p>
       <div class="row" style="margin-top:12px"><button class="btn ${d.demo_mode ? "" : "primary"}" id="toggle">${d.demo_mode ? "Switch to live workspace" : "Enable Demo Mode"}</button></div>`)}
     ${card("Reset synthetic data", `<p class="small">Deletes every Demo-space record and artifact (customers, transactions, decisions, alerts, cases, evidence, models, demo connectors, demo API keys, demo reports) and regenerates a fresh dataset. <b>Live data is never touched.</b> The reset is audited.</p>
       <label class="f" style="margin-top:10px">Type RESET to confirm<input class="input mono" id="confirm"></label>
@@ -199,6 +240,6 @@ async function demo(box) {
   });
   box.querySelector("#reset").onclick = (e) => busy(e.currentTarget, async () => {
     try { const r = await api.post("/demo/reset", { confirm: box.querySelector("#confirm").value });
-      toast(`Demo data regenerated (${r.seed ? r.seed.scored : 0} decisions)`); demo(box); } catch (err) { errToast(err); }
+      toast(`Demo workspace regenerated: ${r.seed ? r.seed.customers : 0} customers, ${r.seed ? r.seed.history : 0} historical transactions. Start a channel to stream data.`); demo(box); } catch (err) { errToast(err); }
   });
 }
