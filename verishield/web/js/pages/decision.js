@@ -18,7 +18,7 @@ export async function render(el) {
         <div class="form-grid">
           <label class="f">Transaction ID<input class="input" name="transaction_id" value="UI-${Date.now().toString(36).toUpperCase()}" required></label>
           <label class="f">Customer<input class="input" name="customer_id" list="custs" value="${esc(customers[0] || "C00001")}" required><datalist id="custs">${customers.map((c) => `<option value="${esc(c)}">`).join("")}</datalist></label>
-          <label class="f">Product<select class="input" name="transaction_type">${options(["bank_transfer", "phone_recharge", "prepaid_card"], "bank_transfer")}</select></label>
+          <label class="f">Product<select class="input" name="transaction_type">${options(["bank_transfer", "phone_recharge", "prepaid_card", "card_payment", "cash_withdrawal", "cash_deposit", "incoming_transfer"], "bank_transfer")}</select></label>
           <label class="f">Amount (${esc(S.me.tenant.currency)})<input class="input" name="amount" type="number" step="0.01" min="0.01" value="1250" required></label>
           <label class="f">Channel<select class="input" name="channel">${options(["mobile_banking", "internet_banking", "branch", "atm_kiosk", "api"], "mobile_banking")}</select></label>
           <label class="f">Timestamp<input class="input" type="datetime-local" name="timestamp" value="${now}"></label>

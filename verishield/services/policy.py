@@ -32,13 +32,15 @@ SEVERITY = {o: i for i, o in enumerate(OUTCOMES)}
 FALLBACKS = ("FAIL_OPEN", "FAIL_CLOSED", "FALLBACK_HOLD")
 RULE_CONDITION_KEYS = ("tx_types", "channels", "segments", "customer_types", "customer_risk", "countries",
                        "min_amount", "max_amount", "new_beneficiary", "velocity_count", "velocity_hours",
-                       "hours", "modes")
+                       "hours", "modes", "mccs", "entry_modes", "min_fraud_score", "aml_levels")
 
 DEFAULT_POLICY: dict[str, Any] = {
     "engine_thresholds": {
         "suspicious": 0.50, "high": 0.65, "critical": 0.80,
         "local_alert": 0.92, "temporal_alert": 0.92, "global_alert": 0.97,
-        "max_amount": {"bank_transfer": 15000, "phone_recharge": 150, "prepaid_card": 2500},
+        "max_amount": {"bank_transfer": 15000, "phone_recharge": 150, "prepaid_card": 2500, "card_payment": 8000,
+                       "cash_withdrawal": 6000, "cash_deposit": 60000, "incoming_transfer": 150000,
+                       "cheque_deposit": 100000, "cheque_payment": 100000},
         "hard_rule_score": 0.85,
         "high_risk_countries": ["KY", "PA", "VG", "BZ", "SC", "RU", "NG", "IR", "KP"],
         "high_risk_country_boost": 0.10,
@@ -61,7 +63,43 @@ DEFAULT_POLICY: dict[str, Any] = {
         "high_risk_customer_amount": 5000,
         "elevated_action": "REVIEW",
         "high_action": "HOLD",
+        "passthrough_hours": 48,
+        "passthrough_min_inflow": 3000,
+        "passthrough_ratio": 0.8,
+        "passthrough_min_senders": 2,
+        "originators_days": 7,
+        "many_originators": 3,
     },
+    "signals": {
+        "watchlist_action": "HOLD",
+        "sanctions_action": "HOLD",
+        "sanctions_min_score": 0.88,
+        "device_risk_review": 0.6,
+        "device_risk_hold": 0.85,
+        "supervised_review": 0.7,
+        "supervised_hold": 0.9,
+        "confirmation_sms": True,
+        "confirmation_minutes": 30,
+        # cheques
+        "cheque_duplicate_action": "HOLD",
+        "cheque_sequence_gap": 60,
+        "cheque_sequence_action": "REVIEW",
+        "returned_cheques_review": 2,
+        "returned_cheques_hold": 4,
+        "cheque_stale_months": 6,
+        "cheque_kiting_days": 2,
+        "cheque_kiting_share": 0.8,
+        "cheque_kiting_action": "HOLD",
+        # network / mule accounts
+        "mule_review": 0.45,
+        "mule_hold": 0.75,
+        "network_review": 0.6,
+        # customer confirmation channel and cards
+        "confirmation_channel": "PUSH_THEN_SMS",
+        "push_fallback_seconds": 120,
+        "freeze_card_on_denial": True,
+    },
+    "ctr": {"enabled": True, "threshold": None, "aggregate_daily": True, "exempt_customers": [], "lookback_days": 3},
     "rules": [
         {"id": "R-HRC-HOLD", "name": "Large transfer to high-risk jurisdiction", "enabled": True,
          "conditions": {"tx_types": ["bank_transfer"], "countries": ["KY", "PA", "VG", "IR", "KP"],
@@ -73,6 +111,14 @@ DEFAULT_POLICY: dict[str, Any] = {
         {"id": "R-RECHARGE-BURST", "name": "Burst of phone recharges", "enabled": True,
          "conditions": {"tx_types": ["phone_recharge"], "velocity_count": 5, "velocity_hours": 1},
          "action": "HOLD", "reason_code": "RECHARGE_VELOCITY"},
+        {"id": "R-CARD-TESTING", "name": "Card testing: burst of online payments to new merchants", "enabled": True,
+         "conditions": {"tx_types": ["card_payment"], "entry_modes": ["ECOM"], "new_beneficiary": True,
+                        "velocity_count": 3, "velocity_hours": 1},
+         "action": "HOLD", "reason_code": "CARD_TESTING_PATTERN"},
+        {"id": "R-ATM-NIGHT", "name": "Repeated night-time ATM withdrawals", "enabled": True,
+         "conditions": {"tx_types": ["cash_withdrawal"], "hours": [23, 0, 1, 2, 3, 4], "velocity_count": 2,
+                        "velocity_hours": 3},
+         "action": "HOLD", "reason_code": "ATM_CASHOUT_PATTERN"},
     ],
     "undertrained": {"cap_action": "REVIEW", "note": "Limited history alone never triggers HOLD/DECLINE"},
     "fallback": {"default": "FAIL_OPEN", "bank_transfer": "FALLBACK_HOLD", "phone_recharge": "FAIL_OPEN",
@@ -247,6 +293,14 @@ def rule_matches(rule: dict, ctx: dict) -> bool:
         return False
     if cond.get("hours") and ctx.get("hour") not in [int(h) for h in cond["hours"]]:
         return False
+    if cond.get("mccs") and str(ctx.get("mcc") or "") not in [str(m) for m in cond["mccs"]]:
+        return False
+    if cond.get("entry_modes") and (ctx.get("entry_mode") or "") not in cond["entry_modes"]:
+        return False
+    if cond.get("min_fraud_score") is not None and float(ctx.get("fraud_score") or 0) < float(cond["min_fraud_score"]):
+        return False
+    if cond.get("aml_levels") and ctx.get("aml_level") not in cond["aml_levels"]:
+        return False
     if cond.get("velocity_count"):
         hours = float(cond.get("velocity_hours") or 24)
         count = ctx["velocity"](hours, cond.get("tx_types"))
@@ -319,10 +373,13 @@ def simulate(db: Session, tenant_id: str, space: str, doc: dict, days: int = 30,
         rule_ctx = {"tx_type": tx.tx_type, "channel": tx.channel, "mode": tx.mode, "amount": tx.amount,
                     "segment_key": cust.segment_key if cust else None,
                     "customer_type": cust.customer_type if cust else None,
-                    "customer_risk": cust.risk_category if cust else None, "beneficiary_country": etx.iban_cc,
+                    "customer_risk": cust.risk_category if cust else None,
+                    "beneficiary_country": etx.counterparty_country,
                     "ip_country": etx.ip_country, "hour": tx.ts.hour, "new_beneficiary": ctx.new_beneficiary(),
-                    "velocity": ctx.velocity}
+                    "velocity": ctx.velocity, "mcc": etx.mcc, "entry_mode": etx.entry_mode,
+                    "fraud_score": dec.fraud_score, "aml_level": aml["level"]}
         hits = [{"id": r["id"], "action": r["action"]} for r in doc.get("rules", []) if rule_matches(r, rule_ctx)]
+        hits += [{"id": h["id"], "action": h["action"]} for h in (dec.rule_hits or []) if h.get("kind") == "signal"]
         old_hits = {h["id"] for h in (dec.rule_hits or []) if h.get("kind") == "policy_rule"}
         aml_changes += int(aml["level"] != dec.aml_signal_level)
         rule_changes += int({h["id"] for h in hits} != old_hits)

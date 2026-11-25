@@ -29,13 +29,33 @@ FEATURES: dict[str, list[tuple[str, str]]] = {
                        ("cc_asn", "categorical"), ("ip", "categorical"), ("hour", "hour")],
     "prepaid_card": [("amount", "numeric"), ("card_id", "categorical"), ("cc_asn", "categorical"),
                      ("ip", "categorical"), ("hour", "hour")],
+    "card_payment": [("amount", "numeric"), ("merchant", "categorical"), ("mcc", "categorical"),
+                     ("merchant_cc", "categorical"), ("entry_mode", "categorical"), ("hour", "hour")],
+    "cash_withdrawal": [("amount", "numeric"), ("terminal", "categorical"), ("location", "categorical"),
+                        ("hour", "hour")],
+    "cash_deposit": [("amount", "numeric"), ("terminal", "categorical"), ("location", "categorical"),
+                     ("hour", "hour")],
+    "incoming_transfer": [("amount", "numeric"), ("counterparty", "categorical"), ("counterparty_cc", "categorical"),
+                          ("hour", "hour")],
+    # cheques: drawer account / bank for deposits, payee for the customer's own cheques
+    "cheque_deposit": [("amount", "numeric"), ("counterparty", "categorical"), ("drawer_bank", "categorical"),
+                       ("location", "categorical")],
+    "cheque_payment": [("amount", "numeric"), ("counterparty", "categorical"), ("location", "categorical")],
 }
 FEATURE_LABELS = {
     "amount": "Amount", "iban": "Beneficiary IBAN", "iban_cc": "Beneficiary country",
     "cc_asn": "Connection (country/ASN)", "ip": "IP address", "hour": "Time of day",
     "phone_number": "Recharged phone number", "operator": "Phone operator", "card_id": "Prepaid card",
+    "merchant": "Merchant", "mcc": "Merchant category", "merchant_cc": "Merchant country", "entry_mode": "Card entry mode",
+    "terminal": "Terminal (ATM / branch)", "location": "Terminal location", "counterparty": "Originator account",
+    "counterparty_cc": "Originator country", "drawer_bank": "Drawer's bank",
 }
-TYPE_NOUN = {"bank_transfer": "transfers", "phone_recharge": "phone recharges", "prepaid_card": "prepaid-card top-ups"}
+TYPE_LABELS = {("cheque_deposit", "counterparty"): "Drawer account", ("cheque_payment", "counterparty"): "Cheque payee",
+               ("cheque_deposit", "location"): "Branch", ("cheque_payment", "location"): "Presenting branch"}
+TYPE_NOUN = {"bank_transfer": "transfers", "phone_recharge": "phone recharges", "prepaid_card": "prepaid-card top-ups",
+             "card_payment": "card payments", "cash_withdrawal": "cash withdrawals", "cash_deposit": "cash deposits",
+             "incoming_transfer": "incoming transfers", "cheque_deposit": "cheque deposits",
+             "cheque_payment": "cheques issued"}
 
 
 def mask(value: Optional[str]) -> str:
@@ -114,7 +134,16 @@ class LocalProfiler:
             self._add(tx)
         self.fitted = True
 
+    def _ensure_type(self, tx_type: str) -> None:
+        """Models trained before a transaction type existed learn it from scratch."""
+        if tx_type not in self.edges:
+            self.edges[tx_type] = amount_edges(np.array([]), int(self.cfg.get("amount_bins", 24)))
+        if tx_type not in self.population:
+            self.population[tx_type] = TypeProfile.empty(tx_type, self.edges[tx_type],
+                                                         float(self.cfg.get("neighbor_weight", 0.5)))
+
     def _profile(self, user_id: str, tx_type: str) -> TypeProfile:
+        self._ensure_type(tx_type)
         per_user = self.users[user_id]
         if tx_type not in per_user:
             per_user[tx_type] = TypeProfile.empty(tx_type, self.edges[tx_type], float(self.cfg.get("neighbor_weight", 0.5)))
@@ -183,14 +212,14 @@ class LocalProfiler:
     # ------------------------------------------------------- explanations
     def _reason(self, tx: Transaction, name: str, kind: str, term: float,
                 prof: Optional[TypeProfile], undertrained: bool) -> Reason:
-        label = FEATURE_LABELS.get(name, name)
+        label = TYPE_LABELS.get((tx.tx_type, name)) or FEATURE_LABELS.get(name, name)
         noun = TYPE_NOUN[tx.tx_type]
         n = prof.n if prof else 0
         suffix = " (few past operations: compared with similar customers)" if undertrained else ""
         if kind == "categorical":
             value = tx.feature(name)
             seen = prof.hists[name].count(value) if prof else 0
-            sensitive = name in ("iban", "card_id", "phone_number", "ip")
+            sensitive = name in ("iban", "card_id", "phone_number", "ip", "counterparty")
             usual = ", ".join(mask(v) if sensitive else str(v) for v, _ in prof.hists[name].most_common(2)) \
                 if prof and prof.n else "none"
             shown = mask(value) if sensitive else (value or "-")

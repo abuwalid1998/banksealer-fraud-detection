@@ -8,6 +8,69 @@ import { createCaseDialog, openTransaction } from "./transactions.js";
 const can = (p) => S.me.permissions.includes(p);
 
 export async function render(el, { params }) {
+  const tabs = [["queue", "Alert queue"], ["groups", "Grouped by customer"]];
+  if (can("confirmations.answer") || can("alerts.view_all")) tabs.push(["confirm", "Customer confirmations"]);
+  if (can("cards.view") || can("cards.manage")) tabs.push(["cards", "Card freezes"]);
+  let cur = params.tab || "queue";
+  const draw = () => {
+    el.innerHTML = `<div class="row" style="margin-bottom:0"><div class="tabs" style="flex:1">${tabs.map(([k, l]) => `<button class="${k === cur ? "on" : ""}" data-t="${k}">${l}</button>`).join("")}</div>
+      ${can("fraud.report") ? '<button class="btn danger sm" id="rf" style="margin-bottom:16px">Customer reports fraud</button>' : ""}</div><div id="atab"></div>`;
+    el.querySelectorAll("[data-t]").forEach((b) => (b.onclick = () => { cur = b.dataset.t; draw(); }));
+    const rf = el.querySelector("#rf");
+    if (rf) rf.onclick = async () => { const { reportFraud } = await import("./customers.js"); reportFraud(); };
+    const box = el.querySelector("#atab");
+    (cur === "queue" ? queue(box, params) : cur === "groups" ? groups(box) : cur === "cards" ? cardFreezes(box) : confirmations(box)).catch(errToast);
+  };
+  draw();
+}
+
+async function groups(box) {
+  const d = await api.get("/alerts/groups?hours=168");
+  box.innerHTML = card(`${d.groups.length} groups from ${d.alerts} open alerts (last 7 days)`, table([
+    { label: "Customer", render: (g) => `<a href="#/customers/${encodeURIComponent(g.customer_ref)}">${esc(g.customer_ref)}</a><div class="tiny muted">${esc(g.customer_name)}</div>` },
+    { label: "Main reason", render: (g) => `<span class="code">${esc(g.reason)}</span>${g.kind !== "TRANSACTION" ? " " + chip(g.kind, "warn") : ""}` },
+    { label: "Alerts", num: true, render: (g) => `<b>${g.count}</b>` }, { label: "Severity", render: (g) => chip(g.severity) },
+    { label: "Max score", num: true, render: (g) => fmtScore(g.max_score) },
+    { label: "Decisions", render: (g) => Object.entries(g.decisions).map(([k, v]) => `${decisionChip(k)} ${v}`).join(" ") },
+    { label: "Period", render: (g) => `<span class="small">${fmtRel(g.first)} → ${fmtRel(g.last)}</span>` },
+    { label: "", render: (g) => `<div class="row nowrap">${can("cases.create") ? `<button class="btn sm primary" data-case="${esc(g.key)}">Case for group</button>` : ""}${can("alerts.triage") ? `<button class="btn sm" data-close="${esc(g.key)}">Close group</button>` : ""}</div>` },
+  ], d.groups, { empty: "No open alerts." }), { flush: true, sub: "Alerts of the same customer and main reason are handled together – one decision instead of many." });
+  const find = (k) => d.groups.find((g) => g.key === k);
+  box.querySelectorAll("[data-case]").forEach((b) => (b.onclick = async () => {
+    const g = find(b.dataset.case);
+    try { const c = await api.post("/cases", { alert_ids: g.alert_ids, priority: g.severity === "CRITICAL" ? "URGENT" : g.severity === "HIGH" ? "HIGH" : "MEDIUM", auto_assign: true,
+      purpose: `${g.count} alerts for ${g.customer_ref}: ${g.reason}` }); toast(`Case ${c.id} created`); navigate(`#/cases/${encodeURIComponent(c.id)}`); } catch (e) { errToast(e); }
+  }));
+  box.querySelectorAll("[data-close]").forEach((b) => (b.onclick = async () => {
+    const g = find(b.dataset.close);
+    const reasons = (await api.get("/alerts?page_size=1")).close_reasons;
+    const r = await modal({ title: `Close ${g.count} alert(s) – ${g.customer_ref}`, body: `<label class="f">Reason<select class="input" name="reason">${options(Object.entries(reasons))}</select></label>
+      <label class="f" style="margin-top:10px">Note<textarea class="input" name="note" required></textarea></label>`,
+      actions: [{ label: "Cancel" }, { label: "Close all", cls: "primary", onClick: (m) => api.post("/alerts/bulk-close", { alert_ids: g.alert_ids, reason: m.querySelector("[name=reason]").value, note: m.querySelector("[name=note]").value }) }] });
+    if (r) { toast(`${r.closed} alert(s) closed${r.errors.length ? ` – ${r.errors.length} error(s)` : ""}`); groups(box); }
+  }));
+}
+
+async function confirmations(box) {
+  const d = await api.get("/confirmations");
+  const c = d.counts;
+  box.innerHTML = `${d.simulated ? '<div class="notice warn" style="margin-bottom:12px">Demo Mode: app notifications and SMS messages are simulated – record the customer\'s answer with the buttons to see the release / reject flow.</div>' : ""}
+    ${card(`Payment confirmations · ${c.SENT || 0} waiting · ${c.CONFIRMED || 0} confirmed · ${c.DENIED || 0} denied · ${c.EXPIRED || 0} expired`, table([
+      { label: "Sent", render: (x) => fmtRel(x.sent_at) }, { label: "Payment", render: (x) => `<a href="#" data-tx="${esc(x.tx_ref)}" class="mono small">${esc(x.tx_ref)}</a>` },
+      { label: "Customer", render: (x) => `<a href="#/customers/${encodeURIComponent(x.customer_ref)}">${esc(x.customer_ref)}</a><div class="tiny muted">${esc(x.phone)}</div>` },
+      { label: "Channel", render: (x) => chip(x.channel || "SMS", x.channel === "PUSH" ? "info" : "neutral") + (x.answered_via ? `<div class="tiny muted">answered via ${esc(x.answered_via.toLowerCase())}</div>` : "") },
+      { label: "Message", render: (x) => `<span class="small">${esc(x.message)}</span>` }, { label: "Status", render: (x) => chip(x.status, x.status === "CONFIRMED" ? "ok" : x.status === "DENIED" ? "crit" : x.status === "SENT" ? "warn" : "neutral") + (x.reply ? `<div class="tiny muted">reply: ${esc(x.reply)}</div>` : "") },
+      { label: "", render: (x) => x.status === "SENT" && can("confirmations.answer") ? `<div class="row nowrap"><button class="btn sm teal" data-ans="${x.id}" data-r="1">Customer: YES</button><button class="btn sm danger" data-ans="${x.id}" data-r="2">Customer: NO</button></div>` : "" },
+    ], d.confirmations, { empty: "No confirmation requests yet – they are sent when a payment is held." }), { flush: true,
+      sub: "Held payments ask the customer in the bank's app first (SMS if there is no answer): YES releases the payment, NO rejects it, opens an urgent case, watch-lists the beneficiary and freezes the card for card payments." })}`;
+  box.querySelectorAll("[data-tx]").forEach((a) => (a.onclick = (e) => { e.preventDefault(); openTransaction(a.dataset.tx); }));
+  box.querySelectorAll("[data-ans]").forEach((b) => (b.onclick = async () => {
+    try { const r = await api.post(`/confirmations/${b.dataset.ans}/answer`, { reply: b.dataset.r });
+      toast(r.result === "released" ? "Payment released – alert closed" : `Payment rejected – case ${r.case_id} opened`, "ok", 6000); confirmations(box); } catch (e) { errToast(e); }
+  }));
+}
+
+async function queue(el, params) {
   const f = { status: params.status || "ACTIVE", severity: "", timing: "", decision: "", search: "", page: 1 };
   const selected = new Set();
   el.innerHTML = `${card("AML alert queue", `<div class="filters" id="flt">
@@ -70,4 +133,22 @@ export async function render(el, { params }) {
   }));
   load();
   live(el, 8000, async () => { if (!selected.size && f.page === 1) await load(); });
+}
+
+async function cardFreezes(box) {
+  const d = await api.get("/cards/frozen");
+  box.innerHTML = card(`${d.frozen} card(s) frozen`, table([
+    { label: "Frozen", render: (c) => fmtRel(c.frozen_at) }, { label: "Card", render: (c) => `<span class="mono small">${esc(c.card_ref)}</span>` },
+    { label: "Customer", render: (c) => `<a href="#/customers/${encodeURIComponent(c.customer_ref)}">${esc(c.customer_ref)}</a>` },
+    { label: "Source", render: (c) => chip(c.source, c.source === "CUSTOMER_APP" ? "info" : c.source === "AUTO" ? "warn" : "neutral") },
+    { label: "Reason", render: (c) => `<span class="small">${esc(c.reason)}</span>${c.case_id ? `<div class="tiny"><a href="#/cases/${encodeURIComponent(c.case_id)}">${esc(c.case_id)}</a></div>` : ""}` },
+    { label: "Card system", render: (c) => chip(c.command_status || "-", c.command_status === "FAILED" ? "crit" : "neutral") },
+    { label: "Status", render: (c) => chip(c.status, c.status === "FROZEN" ? "crit" : "ok") + (c.unfrozen_by ? `<div class="tiny muted">by ${esc(c.unfrozen_by)} ${fmtRel(c.unfrozen_at)}</div>` : "") },
+    { label: "", render: (c) => c.status === "FROZEN" && d.can_manage ? `<button class="btn sm" data-unf="${esc(c.card_ref)}">Unfreeze</button>` : "" },
+  ], d.controls, { empty: "No card has been frozen." }), { flush: true, sub: "Customers can freeze (and unfreeze their own freezes) in the app; freezes after a denied payment or by the AML team are released here." });
+  box.querySelectorAll("[data-unf]").forEach((b) => (b.onclick = async () => {
+    const r = await modal({ title: `Unfreeze ${b.dataset.unf}`, body: '<label class="f">Reason<textarea class="input" name="reason"></textarea></label>',
+      actions: [{ label: "Cancel" }, { label: "Unfreeze", cls: "primary", onClick: (m) => api.post(`/cards/${encodeURIComponent(b.dataset.unf)}/unfreeze`, { reason: m.querySelector("[name=reason]").value }) }] });
+    if (r) { toast("Card unfrozen"); cardFreezes(box); }
+  }));
 }

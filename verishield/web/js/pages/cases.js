@@ -1,8 +1,8 @@
 // AML case list and case file (BRD 7.3, 10).
 import { api } from "../api.js";
 import { navigate } from "../app.js";
-import { S, bindTable, busy, card, chip, confirmDialog, errToast, esc, fmtDate, fmtNum, fmtRel, kv, label, loading,
-  modal, options, pager, table, toast } from "../ui.js";
+import { S, bindTable, busy, card, chip, confirmDialog, errToast, esc, fmtDate, fmtNum, fmtRel, icon, kv, label, loading,
+  modal, options, pager, table, toast, toggle } from "../ui.js";
 import { openTransaction } from "./transactions.js";
 
 const can = (p) => S.me.permissions.includes(p);
@@ -19,7 +19,22 @@ export async function render(el, { sub, params, setTitle }) {
       <select class="input" name="priority">${options(["URGENT", "HIGH", "MEDIUM", "LOW"], "", { blank: "All priorities" })}</select>
       ${analysts.length ? `<select class="input" name="assignee_id">${options(analysts.map((u) => [u.id, u.name]), "", { blank: "All analysts" })}</select>` : ""}
       <label class="check"><input type="checkbox" name="open_only" ${f.open_only === "true" ? "checked" : ""}> Open only</label>
-    </div>`, { sub: can("cases.view_all") ? "" : "Cases assigned to you" })}<div class="card" style="margin-top:16px" id="list">${loading()}</div>`;
+    </div>`, { sub: can("cases.view_all") ? "" : "Cases assigned to you", actions: can("cases.assign") ? '<button class="btn sm" id="auto">Automation</button>' : "" })}<div class="card" style="margin-top:16px" id="list">${loading()}</div>`;
+  const auto = el.querySelector("#auto");
+  if (auto) auto.onclick = async () => {
+    const c = (await api.get("/case-automation")).config;
+    const r = await modal({ title: "Case automation", body: `<div class="stack" style="gap:12px">
+      ${toggle("auto_assign", c.auto_assign, "Assign new cases automatically when no analyst is chosen")}
+      <label class="f">Assignment strategy<select class="input" name="strategy">${options([["LEAST_LOADED", "Least loaded analyst (fewest open cases)"], ["ROUND_ROBIN", "Round robin"]], c.strategy)}</select></label>
+      ${toggle("auto_case_critical", c.auto_case_critical, "Open a case automatically for every CRITICAL alert")}
+      <label class="f">Escalate open cases this many hours before the due date<input class="input" type="number" name="escalate_hours_before_due" value="${c.escalate_hours_before_due}"></label>
+      ${toggle("escalate_bump_priority", c.escalate_bump_priority, "Raise the priority when escalating (and notify the AML Manager)")}</div>`,
+      actions: [{ label: "Cancel" }, { label: "Save", cls: "primary", onClick: (m) => api.put("/case-automation", {
+        auto_assign: m.querySelector("[name=auto_assign]").checked, strategy: m.querySelector("[name=strategy]").value,
+        auto_case_critical: m.querySelector("[name=auto_case_critical]").checked, escalate_bump_priority: m.querySelector("[name=escalate_bump_priority]").checked,
+        escalate_hours_before_due: Number(m.querySelector("[name=escalate_hours_before_due]").value) }) }] });
+    if (r) toast("Automation saved");
+  };
   const load = async () => {
     const q = new URLSearchParams(Object.entries(f).filter(([, v]) => v !== "" && v !== "false")).toString();
     const box = el.querySelector("#list");
@@ -61,6 +76,9 @@ async function caseFile(el, id, setTitle) {
     if (perm.close) acts.push('<button class="btn" data-a="close">Close case</button>');
     if (perm.reopen) acts.push('<button class="btn" data-a="reopen">Reopen</button>');
     acts.push('<button class="btn" data-a="pdf">Investigation report</button>');
+    acts.push(`<button class="btn" data-a="ai">${icon("sparkle")} Summary</button>`);
+    if (can("str.prepare") || can("str.approve")) acts.push('<button class="btn" data-a="str">Prepare STR</button>');
+    if (c.links.some((l) => l.type === "CUSTOMER")) acts.push(`<button class="btn" data-a="net">${icon("network")} Network</button>`);
     const links = c.links.filter((l) => l.type !== "ALERT");
     const rec = c.recommendation || {}, disp = c.disposition || {};
     el.innerHTML = `<div class="row" style="margin-bottom:14px"><a href="#/cases" class="btn sm ghost">← Cases</a>
@@ -118,6 +136,24 @@ async function caseFile(el, id, setTitle) {
       try { const j = await api.post("/reports", { type: "investigation", format: "pdf", params: { case_id: c.id } });
         await api.download(`/reports/${encodeURIComponent(j.id)}/download`); } catch (err) { errToast(err); }
     });
+    if (a("ai")) a("ai").onclick = (e) => busy(e.currentTarget, async () => {
+      try {
+        const r = await api.post(`/cases/${encodeURIComponent(c.id)}/ai-summary`, {});
+        await modal({ title: `Case summary – ${c.id}`, wide: true, body: `<div class="notice ${r.source === "ai" ? "" : "warn"}" style="margin-bottom:12px">${esc(r.note)}${r.model ? ` · ${esc(r.model)}` : ""}</div>
+          <textarea class="input" id="sumtxt" rows="16">${esc(r.text)}</textarea>`,
+          actions: [{ label: "Close" }, ...(c.permissions.work || c.permissions.dispose ? [{ label: "Save as case note", cls: "primary",
+            onClick: (m) => api.post(`/cases/${c.id}/notes`, { body: m.querySelector("#sumtxt").value, kind: "FINDING" }) }] : [])] });
+        reload();
+      } catch (err) { errToast(err); }
+    });
+    if (a("str")) a("str").onclick = (e) => busy(e.currentTarget, async () => {
+      try { const r = await api.post(`/cases/${encodeURIComponent(c.id)}/str`); const { openStr } = await import("./str.js"); openStr(r.id, reload); } catch (err) { errToast(err); }
+    });
+    if (a("net")) a("net").onclick = async () => {
+      const ref = c.links.find((l) => l.type === "CUSTOMER").ref;
+      const { showNetwork } = await import("./customers.js");
+      showNetwork(ref);
+    };
     if (a("start")) a("start").onclick = (e) => call(e.currentTarget, () => api.post(`/cases/${c.id}/start`), "Investigation started");
     if (a("review")) a("review").onclick = (e) => call(e.currentTarget, () => api.post(`/cases/${c.id}/review`), "Manager review started");
     if (a("close")) a("close").onclick = (e) => call(e.currentTarget, () => api.post(`/cases/${c.id}/close`), "Case closed");

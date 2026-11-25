@@ -262,6 +262,10 @@ if (Test-Path $VenvPy) {
 if (-not (Test-Path $VenvPy)) { Invoke-Native $python.Exe @("-m", "venv", $Venv) "Creating the virtual environment" }
 Invoke-Native $VenvPy @("-m", "pip", "install", "--no-index", "--find-links", $wheels, "--disable-pip-version-check",
     "--no-warn-script-location", "-r", (Join-Path $Bundle "requirements-windows.txt")) "Installing libraries"
+if (Test-Path (Join-Path $Bundle "WITH_AI")) {
+    Invoke-Native $VenvPy @("-m", "pip", "install", "--no-index", "--find-links", $wheels, "--disable-pip-version-check",
+        "--no-warn-script-location", "-r", (Join-Path $Bundle "app\requirements-ai.txt")) "Installing the optional AI assistant library"
+}
 Invoke-Native $VenvPy @("-m", "pip", "check", "--disable-pip-version-check") "Verifying libraries"
 Invoke-Native $VenvPy @("-c", "import fastapi, uvicorn, sqlalchemy, numpy, reportlab, openpyxl, cryptography, psycopg; print('    libraries import OK')") "Import test"
 

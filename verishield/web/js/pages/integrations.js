@@ -11,10 +11,10 @@ export async function render(el) {
   let tab = "connectors";
   const draw = () => {
     const dbTab = can("tenant.manage") || can("connectors.manage");
-    el.innerHTML = `<div class="tabs"><button data-t="connectors" class="${tab === "connectors" ? "on" : ""}">Channels &amp; connectors</button>${dbTab ? `<button data-t="db" class="${tab === "db" ? "on" : ""}">Fraud engine database</button>` : ""}<button data-t="dlq" class="${tab === "dlq" ? "on" : ""}">Dead-letter queue</button><button data-t="push" class="${tab === "push" ? "on" : ""}">Push API</button></div><div id="tab">${loading()}</div>`;
+    el.innerHTML = `<div class="tabs"><button data-t="connectors" class="${tab === "connectors" ? "on" : ""}">Channels &amp; connectors</button>${dbTab ? `<button data-t="db" class="${tab === "db" ? "on" : ""}">Fraud engine database</button>` : ""}<button data-t="quality" class="${tab === "quality" ? "on" : ""}">Data quality</button><button data-t="dlq" class="${tab === "dlq" ? "on" : ""}">Dead-letter queue</button><button data-t="push" class="${tab === "push" ? "on" : ""}">Push API</button>${can("siem.manage") ? `<button data-t="siem" class="${tab === "siem" ? "on" : ""}">Monitoring &amp; SIEM</button>` : ""}</div><div id="tab">${loading()}</div>`;
     el.querySelectorAll("[data-t]").forEach((b) => (b.onclick = () => { tab = b.dataset.t; draw(); }));
     const box = el.querySelector("#tab");
-    (tab === "connectors" ? connectors(box) : tab === "db" ? database(box) : tab === "dlq" ? deadLetters(box) : push(box)).catch(errToast);
+    (tab === "connectors" ? connectors(box) : tab === "db" ? database(box) : tab === "quality" ? quality(box) : tab === "dlq" ? deadLetters(box) : tab === "siem" ? monitoring(box) : push(box)).catch(errToast);
     if (tab === "connectors") live(box, 5000, () => connectors(box));
   };
   draw();
@@ -275,4 +275,58 @@ async function push(box) {
     <tr><td class="mono small">GET /api/v1/transactions/{id}/decision</td><td class="mono small">decisions:write</td><td>Original decision, policy and model version</td></tr>
     <tr><td class="mono small">GET /health · /ready · /metrics</td><td>–</td><td>Liveness, readiness and Prometheus metrics</td></tr></tbody></table>
     <p class="small" style="margin-top:12px">Create keys under <a href="#/settings">Users &amp; Settings › API clients</a>. Full contracts: <a href="/api/docs" target="_blank" rel="noopener">OpenAPI documentation</a>.</p>`);
+}
+
+async function quality(box) {
+  const d = await api.get("/connectors-quality?hours=24");
+  box.innerHTML = `<div class="grid g2">${d.channels.map((q) => card(q.name, `<div class="row" style="margin-bottom:10px">${chip(q.health, q.health === "OK" ? "ok" : "warn")} ${chip(q.status)}<span class="spacer"></span>
+      <span class="small muted">${q.rate_per_hour}/h${q.baseline_per_hour ? ` · usual ${q.baseline_per_hour}/h` : ""}</span></div>
+    ${q.issues.length ? `<div class="notice warn" style="margin-bottom:10px">${q.issues.map(esc).join("<br>")}</div>` : ""}
+    ${kv([["Received (24h)", fmtNum(q.received)], ["Accepted", fmtNum(q.accepted)], ["Rejected", fmtNum(q.rejected)], ["Duplicates", fmtNum(q.duplicates)],
+      ["Unknown types", fmtNum(q.unknown_types)], ["Median delivery delay", q.median_delay_min == null ? "–" : `${q.median_delay_min} min`]])}
+    <h4 style="margin:12px 0 6px">Missing fields</h4>${hbarsQ(Object.entries(q.missing_pct).map(([k, v]) => ({ label: label(k), value: v ?? 0, color: (v || 0) > 20 ? "#E8A33A" : "#0BAA9B" })))}
+    ${Object.keys(q.types).length ? `<h4 style="margin:12px 0 6px">Products</h4><div class="codes">${Object.entries(q.types).map(([k, v]) => `<span class="code">${esc(k)} ${v}</span>`).join("")}</div>` : ""}
+    ${q.top_rejections.length ? `<h4 style="margin:12px 0 6px">Top rejection reasons</h4><ul class="small">${q.top_rejections.map(([r, n]) => `<li>${esc(r)} (${n})</li>`).join("")}</ul>` : ""}`,
+    { sub: esc(q.type) })).join("") || empty("No inbound channels.")}</div>
+  <p class="tiny muted" style="margin-top:10px">Checked hourly: a drop below 30% of the usual volume, more than 5% rejected records, unknown transaction types or missing key fields raise an operations incident.</p>`;
+}
+function hbarsQ(items) { return items.length ? items.map((i) => `<div style="display:grid;grid-template-columns:130px 1fr 52px;gap:8px;align-items:center;font-size:12.5px;margin-bottom:4px"><span>${esc(i.label)}</span><div class="bar"><i style="width:${i.value}%;background:${i.color}"></i></div><b class="right">${i.value}%</b></div>`).join("") : ""; }
+
+// ------------------------------------------------------------------ monitoring & SIEM
+async function monitoring(box) {
+  const d = await api.get("/siem");
+  const c = d.config, st = d.state || {};
+  box.innerHTML = `<div class="grid g2"><form id="sf">${card("Forward security events to the SIEM", `
+      <div class="row" style="margin-bottom:14px"><label class="check"><input type="checkbox" name="enabled" ${c.enabled ? "checked" : ""}> Forwarding ON</label><span class="spacer"></span>
+        ${c.enabled ? (st.last_error ? chip("ERROR", "crit") : chip("FORWARDING", "ok")) : chip("OFF", "neutral")}</div>
+      <div class="form-grid">
+        <label class="f">Protocol<select class="input" name="protocol">${options([["udp", "Syslog UDP"], ["tcp", "Syslog TCP"], ["tls", "Syslog TLS"], ["https", "HTTPS collector (Splunk HEC, Elastic...)"]], c.protocol)}</select></label>
+        <label class="f">Format<select class="input" name="format">${options([["cef", "CEF (ArcSight, QRadar, Sentinel)"], ["json", "JSON"]], c.format)}</select></label>
+        <label class="f">Host<input class="input mono" name="host" value="${esc(c.host)}" placeholder="siem.bop.local"></label>
+        <label class="f">Port<input class="input" type="number" name="port" value="${esc(c.port)}"></label>
+        <label class="f" style="grid-column:1/-1">Collector URL (HTTPS)<input class="input mono" name="url" value="${esc(c.url)}" placeholder="https://splunk.bop.local:8088/services/collector"></label>
+        <label class="f">Syslog facility<input class="input" type="number" name="facility" value="${esc(c.facility)}"></label>
+        <label class="f">Token prefix (HTTPS)<input class="input" name="token_prefix" value="${esc(c.token_prefix)}"></label>
+        <label class="check"><input type="checkbox" name="verify_tls" ${c.verify_tls ? "checked" : ""}> Verify the certificate</label>
+        <label class="check"><input type="checkbox" name="include_demo" ${c.include_demo ? "checked" : ""}> Include Demo workspace events</label>
+      </div>
+      <div class="row" style="margin-top:12px"><span class="small">Collector token: ${c.token_configured ? chip("STORED IN VAULT", "ok") : chip("NOT SET", "neutral")}</span><button class="btn sm" type="button" id="tok">Set token</button></div>`,
+    { actions: '<button class="btn sm" type="button" id="test">Send test event</button><button class="btn sm primary">Save</button>',
+      sub: "Every audit event - sign-ins and failures, permission denials, configuration changes, decisions by people, exports, agent calls - is sent once, in order." })}</form>
+    ${card("Forwarding state", kv([["Events sent", fmtNum(st.sent || 0)], ["Waiting (lag)", st.lag == null ? "–" : fmtNum(st.lag)], ["Last sent", st.last_sent_at ? fmtRel(st.last_sent_at) : "–"],
+      ["Last error", st.last_error ? `<span class="small" style="color:var(--red)">${esc(st.last_error)}</span>` : "none"], ["Cursor (audit id)", esc(st.cursor ?? "–")]]) +
+      `<h4 style="margin:16px 0 6px">Prometheus / Grafana</h4><p class="small">Scrape <span class="code">GET /metrics</span> on every server (bearer token <span class="code">VERISHIELD_METRICS_TOKEN</span> when set).
+       Gauges include the cluster leader, open alerts and cases, overdue cases, channel status, dead letters, frozen cards, draft CTRs, decisions in the last 5 minutes and the SIEM lag.
+       A ready-made Grafana dashboard and alert rules are in <span class="code">deploy/monitoring/</span>.</p>`)}</div>`;
+  const f = box.querySelector("#sf");
+  f.onsubmit = (e) => { e.preventDefault(); busy(f.querySelector("button.primary"), async () => {
+    try { const v = {}; f.querySelectorAll("[name]").forEach((i) => (v[i.name] = i.type === "checkbox" ? i.checked : i.type === "number" ? Number(i.value) : i.value.trim()));
+      await api.put("/siem", v); toast("SIEM settings saved"); monitoring(box); } catch (err) { errToast(err); } }); };
+  const t = box.querySelector("#test");
+  t.onclick = () => busy(t, async () => { try { const r = await api.post("/siem/test"); toast(r.ok ? r.detail : `Not sent: ${r.detail}`, r.ok ? "ok" : "error", 8000); } catch (e) { errToast(e); } });
+  box.querySelector("#tok").onclick = async () => {
+    const r = await modal({ title: "SIEM collector token", body: '<label class="f">Token<input class="input" type="password" name="v" autocomplete="new-password"></label><p class="tiny muted" style="margin-top:8px">Stored encrypted in the vault.</p>',
+      actions: [{ label: "Cancel" }, { label: "Store", cls: "primary", onClick: (m) => api.post("/siem/secret", { value: m.querySelector("[name=v]").value }) }] });
+    if (r) { toast("Stored in the vault"); monitoring(box); }
+  };
 }

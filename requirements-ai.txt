@@ -1,0 +1,3 @@
+# Optional AI assistant for case summaries / STR narratives (Anthropic SDK). Install:
+#   pip install -r requirements-ai.txt
+anthropic>=2.13

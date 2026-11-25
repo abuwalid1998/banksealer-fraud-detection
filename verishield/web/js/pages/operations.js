@@ -7,14 +7,15 @@ const can = (p) => S.me.permissions.includes(p);
 
 export async function render(el) {
   const tabs = [];
-  if (can("system.view")) tabs.push(["health", "Platform health"], ["incidents", "Incidents"]);
+  if (can("system.view")) tabs.push(["health", "Platform health"], ["cluster", "Cluster"], ["incidents", "Incidents"]);
   if (can("audit.view")) tabs.push(["audit", "Audit trail"]);
+  if (can("tenant.manage")) tabs.push(["archive", "Archiving"]);
   let cur = tabs[0][0];
   const draw = () => {
     el.innerHTML = `<div class="tabs">${tabs.map(([k, l]) => `<button class="${k === cur ? "on" : ""}" data-t="${k}">${l}</button>`).join("")}</div><div id="tab">${loading()}</div>`;
     el.querySelectorAll("[data-t]").forEach((b) => (b.onclick = () => { cur = b.dataset.t; draw(); }));
     const box = el.querySelector("#tab");
-    ({ health, incidents, audit })[cur](box).catch(errToast);
+    ({ health, cluster, incidents, audit, archive })[cur](box).catch(errToast);
   };
   draw();
 }
@@ -90,4 +91,44 @@ async function audit(box) {
       box.querySelector("#vres").innerHTML = r.valid ? `${chip("CHAIN VALID", "ok")} ${fmtNum(r.checked)} events checked` : `${chip("TAMPERING DETECTED", "crit")} at event #${r.broken_at}`; } catch (err) { errToast(err); }
   });
   await load();
+}
+
+async function archive(box) {
+  const d = await api.get("/archive");
+  const p = d.preview;
+  box.innerHTML = `<div class="grid g2">${card("Archive old records", `${kv([["Retention (transactions)", `${fmtNum(p.retention_days)} days`], ["Cut-off", fmtDate(p.cutoff)],
+      ["Transactions to archive", fmtNum(p.transactions)], ["Decisions", fmtNum(p.decisions)], ["Closed alerts", fmtNum(p.alerts)], ["Kept for open cases", fmtNum(p.protected_by_open_cases)]])}
+      <p class="small" style="margin-top:10px">Records older than the retention period (Users & Settings › Institution) are written to a compressed archive file in the data folder and removed from the live database. Records linked to open cases are kept. The run is audited.</p>
+      <label class="f" style="margin-top:10px">Type ARCHIVE to confirm<input class="input mono" id="cf"></label><div class="row" style="margin-top:10px"><button class="btn primary" id="run" ${p.transactions || p.alerts ? "" : "disabled"}>Archive now</button></div>`)}
+    ${card("Archive files", table([{ label: "File", render: (f) => `<span class="mono small">${esc(f.file)}</span>` }, { label: "Workspace", render: (f) => chip(f.space, "neutral") },
+      { label: "Size", num: true, render: (f) => `${fmtNum(f.bytes / 1024, 0)} KB` }, { label: "Created", render: (f) => fmtDate(f.created) }], d.files, { empty: "No archives yet." }), { flush: true, sub: "Keep these files in the bank's backup / records system" })}</div>`;
+  const run = box.querySelector("#run");
+  run.onclick = () => busy(run, async () => { try { const r = await api.post("/archive/run", { confirm: box.querySelector("#cf").value }); toast(`${fmtNum(r.transactions)} transactions archived`); archive(box); } catch (e) { errToast(e); } });
+}
+
+async function cluster(box) {
+  const c = await api.get("/system/cluster");
+  box.innerHTML = `${(c.warnings || []).map((w) => `<div class="notice warn" style="margin-bottom:12px">${esc(w)}</div>`).join("")}
+    <div class="kpis">${kpi("Mode", c.cluster_mode ? "Cluster" : "Single server", c.cluster_mode ? "several servers, one database" : "set VERISHIELD_CLUSTER=1 to add servers", "accent")}
+      ${kpi("Servers alive", fmtNum(c.alive), `${c.nodes.length} registered`)}${kpi("Leader", `<span class="mono small">${esc(c.leader || "none")}</span>`, "runs channels and background jobs")}
+      ${kpi("Database", esc(c.database), c.database === "postgresql" ? "shared by all nodes" : "single server only")}</div>
+    <div style="margin-top:16px">${card("Application servers", table([
+      { label: "Node", render: (n) => `<b class="mono small">${esc(n.node_id)}</b>${n.this_node ? ` ${chip("THIS SERVER", "info")}` : ""}` },
+      { label: "Role", render: (n) => chip(n.role, n.role === "LEADER" ? "ok" : "neutral") },
+      { label: "Heartbeat", render: (n) => (n.alive ? chip("ALIVE", "ok") : chip("SILENT", "crit")) + `<div class="tiny muted">${n.seconds_ago}s ago</div>` },
+      { label: "Version", key: "version" }, { label: "Channels running", num: true, render: (n) => fmtNum(n.connectors_running) },
+      { label: "Started", render: (n) => fmtDate(n.started_at) },
+    ], c.nodes, { empty: "No node registered yet." }), { flush: true,
+      sub: "Every server scores decisions behind the load balancer. One leader (database lease, renewed every 10 s, taken over after 30 s) runs the channels and background jobs." })}</div>
+    <div class="grid g2" style="margin-top:16px">
+      ${card("Shared model checkpoints", table([{ label: "Model", render: (x) => `<span class="mono small">${esc(x.model_id)}</span>` }, { label: "#", num: true, key: "seq" },
+        { label: "Size", num: true, render: (x) => `${x.size_mb} MB` }, { label: "Saved by", render: (x) => `<span class="mono tiny">${esc(x.node)}</span>` }, { label: "When", render: (x) => fmtDate(x.saved_at) }],
+        c.checkpoints, { empty: "Checkpoints are written every 5 minutes in cluster mode." }), { flush: true, sub: "Signed (HMAC) - a tampered checkpoint is never loaded" })}
+      ${card("How to add a server", `<ol class="small" style="margin:0;padding-left:18px;line-height:1.7">
+        <li>Use PostgreSQL for <span class="code">VERISHIELD_DATABASE_URL</span> on every server.</li>
+        <li>Give all servers the same <span class="code">VERISHIELD_SECRET_KEY</span> and vault key ring file.</li>
+        <li>Set <span class="code">VERISHIELD_CLUSTER=1</span> and a unique <span class="code">VERISHIELD_NODE_ID</span>.</li>
+        <li>Put the servers behind the load balancer; route by <span class="code">X-Customer-Id</span> when possible (same customer → same server).</li>
+        <li>Health check: <span class="code">GET /ready</span> (returns the role).</li></ol>`)}
+    </div>`;
 }

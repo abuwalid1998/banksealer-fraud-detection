@@ -1,22 +1,23 @@
 // Users & settings (IT Admin): users, institution & security policy, branding, API clients, Demo Mode.
 import { api } from "../api.js";
 import { refreshMe } from "../app.js";
-import { S, busy, card, chip, confirmDialog, errToast, esc, fmtDate, fmtRel, icon, kv, label, loading, modal, options,
-  table, toast, toggle } from "../ui.js";
+import { S, busy, card, chip, confirmDialog, errToast, esc, fmtDate, fmtNum, fmtRel, icon, kpi, kv, label, loading, modal,
+  options, table, toast, toggle } from "../ui.js";
 
 const can = (p) => S.me.permissions.includes(p);
 
 export async function render(el) {
   const tabs = [];
   if (can("users.manage")) tabs.push(["users", "Users"]);
-  if (can("tenant.manage")) tabs.push(["institution", "Institution & security"], ["branding", "Report branding"]);
+  if (can("tenant.manage")) tabs.push(["institution", "Institution & security"], ["directory", "Active Directory"], ["branding", "Report branding"]);
   if (can("api_clients.manage")) tabs.push(["api", "API clients"]);
+  if (can("security.manage")) tabs.push(["security", "Security posture"]);
   if (can("demo.manage")) tabs.push(["demo", "Demo Mode"]);
   let cur = tabs[0][0];
   const draw = () => {
     el.innerHTML = `<div class="tabs">${tabs.map(([k, l]) => `<button class="${k === cur ? "on" : ""}" data-t="${k}">${l}</button>`).join("")}</div><div id="tab">${loading()}</div>`;
     el.querySelectorAll("[data-t]").forEach((b) => (b.onclick = () => { cur = b.dataset.t; draw(); }));
-    ({ users, institution, branding, api: apiClients, demo })[cur](el.querySelector("#tab")).catch(errToast);
+    ({ users, institution, directory, branding, api: apiClients, demo, security })[cur](el.querySelector("#tab")).catch(errToast);
   };
   draw();
 }
@@ -35,12 +36,12 @@ async function users(box) {
     { label: "Name", render: (u) => esc(u.name) }, { label: "E-mail / mobile", render: (u) => `${esc(u.email)} ${u.email && !u.email_verified ? '<span class="tiny muted">(unverified)</span>' : ""}${u.phone ? `<div class="tiny muted">${esc(u.phone)}</div>` : ""}` },
     { label: "Role", render: (u) => `${esc(u.role_label)}${u.extra_permissions.length ? `<div class="tiny muted">+ ${esc(u.extra_permissions.join(", "))}</div>` : ""}` },
     { label: "Status", render: (u) => chip(u.status) + (u.must_change_password ? ' <span class="tiny muted">password change pending</span>' : "") },
-    { label: "MFA", render: (u) => u.mfa_enabled ? chip("ON", "ok") : chip("OFF", "neutral") },
+    { label: "Sign-in", render: (u) => u.auth_source === "AD" ? `${chip("DOMAIN", "info")}<div class="tiny muted">${esc(u.ad_account)}</div>` : (u.mfa_enabled ? chip("MFA ON", "ok") : chip("LOCAL", "neutral")) },
     { label: "Last sign-in", render: (u) => u.last_login_at ? fmtRel(u.last_login_at) : "never" },
     { label: "", render: (u) => `<div class="row nowrap"><button class="btn sm" data-edit="${u.id}">Edit</button><button class="btn sm" data-reset="${u.id}" title="Reset password">${icon("key")} Reset password</button>
       <select class="input" data-act="${u.id}" style="width:auto;padding:4px 6px;font-size:12px"><option value="">Actions…</option>
       ${u.status === "DISABLED" ? '<option value="enable">Enable</option>' : '<option value="disable">Disable</option>'}${u.status === "LOCKED" ? '<option value="unlock">Unlock</option>' : ""}
-      ${u.mfa_enabled ? '<option value="reset-mfa">Reset MFA</option>' : ""}</select></div>` },
+      <option value="directory">Domain sign-in…</option>${u.mfa_enabled ? '<option value="reset-mfa">Reset MFA</option>' : ""}</select></div>` },
   ], d.users), { flush: true, actions: '<button class="btn primary" id="add">Create user</button>',
     sub: "Usernames are identifiers, not security factors. Temporary passwords are single-use and expire." });
   box.querySelector("#add").onclick = async () => {
@@ -78,6 +79,14 @@ async function users(box) {
     const action = s.value; s.value = "";
     if (!action) return;
     const u = d.users.find((x) => x.id === s.dataset.act);
+    if (action === "directory") {
+      const r = await modal({ title: `Domain sign-in – ${u.username}`, body: `<p class="small muted" style="margin-bottom:10px">With domain sign-in the user enters the password of his Windows / Active Directory account; VeriShield never stores it.</p>
+        <label class="f">Sign-in method<select class="input" name="src">${options([["LOCAL", "VeriShield password"], ["AD", "Active Directory account"]], u.auth_source || "LOCAL")}</select></label>
+        <label class="f" style="margin-top:10px">Domain account (sAMAccountName)<input class="input mono" name="acc" value="${esc(u.ad_account || "")}" placeholder="e.g. a.mansour"></label>`,
+        actions: [{ label: "Cancel" }, { label: "Save", cls: "primary", onClick: (m) => api.post(`/users/${u.id}/directory`, { auth_source: m.querySelector("[name=src]").value, ad_account: m.querySelector("[name=acc]").value }) }] });
+      if (r) { toast("Saved"); users(box); }
+      return;
+    }
     if (!(await confirmDialog(`${label(action)} – ${u.username}`, `Apply “${label(action)}” to ${u.name}? This is audited.`, label(action), action === "disable" ? "danger" : "primary"))) return;
     try {
       const r = await api.post(`/users/${u.id}/${action}`);
@@ -199,6 +208,37 @@ async function branding(box) {
     busy(lf.querySelector("button"), async () => { try { await api.upload("/branding/logo", fd); toast("Logo uploaded"); await refreshMe(); } catch (err) { errToast(err); } }); };
 }
 
+async function directory(box) {
+  const { config: c } = await api.get("/directory");
+  box.innerHTML = `<form id="df">${card("Sign-in with the bank's Active Directory", `
+    <div class="row" style="margin-bottom:12px">${toggle("enabled", c.enabled, "Domain sign-in ON")}<span class="spacer"></span>${c.ldap_installed ? chip("LDAP LIBRARY READY", "ok") : chip("ldap3 NOT INSTALLED", "crit")} <span class="small muted">${fmtNum(c.ad_users)} user(s) use domain sign-in</span></div>
+    <div class="form-grid">
+      <label class="f">Domain controller<span class="help">ldaps://dc01.bop.local:636 (recommended)</span><input class="input mono" name="server_url" value="${esc(c.server_url)}"></label>
+      <label class="f">Bind format<span class="help">{account} is replaced by the user's account</span><input class="input mono" name="bind_format" value="${esc(c.bind_format)}" placeholder="{account}@bop.local or BOP\\{account}"></label>
+      <label class="f">Base DN (for groups)<input class="input mono" name="base_dn" value="${esc(c.base_dn)}" placeholder="DC=bop,DC=local"></label>
+      <label class="f">User filter<input class="input mono" name="user_filter" value="${esc(c.user_filter)}"></label>
+      <label class="f">CA certificate file (optional)<input class="input mono" name="ca_file" value="${esc(c.ca_file)}" placeholder="C:\\ProgramData\\VeriShield\\certs\\bank-ca.pem"></label></div>
+    <div class="row" style="margin-top:12px;gap:22px">${toggle("use_starttls", c.use_starttls, "StartTLS on ldap://")}${toggle("verify_tls", c.verify_tls, "Verify the DC certificate")}
+      ${toggle("allow_local_fallback", c.allow_local_fallback, "Fall back to the VeriShield password if the DC is unreachable")}${toggle("sync_roles", c.sync_roles, "Role follows AD groups")}</div>
+    <label class="f" style="margin-top:12px">Group → role mapping (JSON)<textarea class="input mono" name="group_role_map" rows="3">${esc(JSON.stringify(c.group_role_map || {}, null, 1))}</textarea>
+      <span class="help">e.g. {"VS-AML-Managers": "AML_MANAGER", "VS-AML-Analysts": "AML_EMPLOYEE"}</span></label>
+    <p class="small muted" style="margin-top:10px">Link each user to his domain account in the Users tab (Actions › Domain sign-in). Domain users sign in with their VeriShield number or their domain account name; password rules, expiry and lock-out are those of the domain.</p>`,
+    { actions: '<button type="button" class="btn sm" id="test">Test sign-in</button><button class="btn sm primary">Save</button>' })}</form>`;
+  const f = box.querySelector("#df");
+  f.onsubmit = (e) => { e.preventDefault(); busy(f.querySelector("button.primary"), async () => {
+    try {
+      const v = {}; f.querySelectorAll("[name]").forEach((i) => (v[i.name] = i.type === "checkbox" ? i.checked : i.value));
+      v.group_role_map = JSON.parse(v.group_role_map || "{}");
+      await api.put("/directory", v); toast("Directory settings saved"); directory(box);
+    } catch (err) { errToast(err); } }); };
+  box.querySelector("#test").onclick = async () => {
+    const r = await modal({ title: "Test domain sign-in", body: `<p class="small muted">Save the settings first. The password is used once for the bind and not stored.</p>
+      <div class="form-grid" style="margin-top:10px"><label class="f">Domain account<input class="input" name="account"></label><label class="f">Password<input class="input" type="password" name="password"></label></div>`,
+      actions: [{ label: "Cancel" }, { label: "Test", cls: "primary", onClick: (m) => api.post("/directory/test", { account: m.querySelector("[name=account]").value, password: m.querySelector("[name=password]").value }) }] });
+    if (r) toast(r.ok ? `Authenticated${r.mapped_role ? ` – role ${r.mapped_role}` : ""}${r.groups ? ` – ${r.groups.length} group(s)` : ""}` : `Failed: ${r.message}`, r.ok ? "ok" : "error", 8000);
+  };
+}
+
 async function apiClients(box) {
   const d = await api.get("/api-clients");
   box.innerHTML = card("API clients", table([
@@ -206,7 +246,8 @@ async function apiClients(box) {
     { label: "Workspace", render: (c) => chip(c.space, c.space === "DEMO" ? "warn" : "ok") }, { label: "Scopes", render: (c) => c.scopes.map((s) => `<span class="code">${esc(s)}</span>`).join(" ") },
     { label: "Rate limit", render: (c) => `${c.rate_limit_per_minute}/min` }, { label: "Status", render: (c) => c.active ? chip("ACTIVE", "ok") : chip("REVOKED", "crit") },
     { label: "Last used", render: (c) => c.last_used_at ? fmtRel(c.last_used_at) : "never" }, { label: "Created", render: (c) => fmtDate(c.created_at) },
-    { label: "", render: (c) => c.active ? `<button class="btn sm danger" data-rev="${esc(c.id)}">Revoke</button>` : "" },
+    { label: "Rotated", render: (c) => c.rotated_at ? fmtRel(c.rotated_at) + (c.previous_expires_at && new Date(c.previous_expires_at + (c.previous_expires_at.endsWith("Z") ? "" : "Z")) > new Date() ? `<div class="tiny muted">old key valid until ${fmtDate(c.previous_expires_at)}</div>` : "") : "never" },
+    { label: "", render: (c) => c.active ? `<div class="row nowrap"><button class="btn sm" data-rot="${esc(c.id)}">Rotate key</button><button class="btn sm danger" data-rev="${esc(c.id)}">Revoke</button></div>` : "" },
   ], d.clients, { empty: "No API clients yet." }), { flush: true, actions: '<button class="btn primary" id="add">Create API client</button>',
     sub: `New keys are bound to the current ${S.me.tenant.demo_mode ? "Demo" : "Live"} workspace` });
   box.querySelector("#add").onclick = async () => {
@@ -218,6 +259,12 @@ async function apiClients(box) {
         scopes: [...m.querySelectorAll("[data-scope]")].filter((c) => c.checked).map((c) => c.dataset.scope), rate_limit_per_minute: Number(m.querySelector("[name=rl]").value) }) }] });
     if (r) { await secretOnce(`API key for ${r.client.name}`, r.api_key, r.note); apiClients(box); }
   };
+  box.querySelectorAll("[data-rot]").forEach((b) => (b.onclick = async () => {
+    const r = await modal({ title: "Rotate API key", body: `<p class="small">A new key is issued. The current key keeps working during the grace period so the bank system can switch without downtime.</p>
+      <label class="f" style="margin-top:10px">Grace period<select class="input" name="h">${options([[24, "24 hours"], [72, "3 days"], [168, "7 days"], [0, "None - the old key stops now"]], 24)}</select></label>`,
+      actions: [{ label: "Cancel" }, { label: "Rotate", cls: "primary", onClick: (m) => api.post(`/api-clients/${b.dataset.rot}/rotate`, { grace_hours: Number(m.querySelector("[name=h]").value) }) }] });
+    if (r) { await secretOnce(`New API key for ${r.client.name}`, r.api_key, r.note); apiClients(box); }
+  }));
   box.querySelectorAll("[data-rev]").forEach((b) => (b.onclick = async () => {
     if (!(await confirmDialog("Revoke API client", "Calls with this key will be rejected immediately.", "Revoke", "danger"))) return;
     try { await api.del(`/api-clients/${b.dataset.rev}`); toast("Revoked"); apiClients(box); } catch (e) { errToast(e); }
@@ -242,4 +289,30 @@ async function demo(box) {
     try { const r = await api.post("/demo/reset", { confirm: box.querySelector("#confirm").value });
       toast(`Demo workspace regenerated: ${r.seed ? r.seed.customers : 0} customers, ${r.seed ? r.seed.history : 0} historical transactions. Start a channel to stream data.`); demo(box); } catch (err) { errToast(err); }
   });
+}
+
+// ------------------------------------------------------------------ security posture (IT Admin)
+async function security(box) {
+  const d = await api.get("/security/posture");
+  const tone = { PASS: "ok", WARN: "warn", FAIL: "crit", INFO: "neutral" };
+  const areas = [...new Set(d.checks.map((c) => c.area))];
+  box.innerHTML = `<div class="kpis">${kpi("Security score", `${d.score}<span class="small muted"> / 100</span>`, `grade ${d.grade}`, d.score >= 90 ? "" : d.score >= 75 ? "warn" : "crit")}
+      ${kpi("Failed checks", fmtNum(d.fail), "fix before go-live", d.fail ? "crit" : "")}${kpi("Warnings", fmtNum(d.warn), "", d.warn ? "warn" : "")}
+      ${kpi("Vault key", esc(d.vault.primary), d.vault.legacy_in_use ? "derived from the server secret" : `created ${fmtDate(d.vault.primary_created, { time: false })}`)}</div>
+    <div class="grid g2" style="margin-top:16px">${areas.map((a) => card(a, table([
+      { label: "Check", render: (c) => `<b class="small">${esc(c.title)}</b><div class="tiny muted">${esc(c.detail)}</div>` },
+      { label: "", render: (c) => chip(c.status, tone[c.status]) },
+      { label: "How to fix", render: (c) => (c.status === "PASS" ? "" : `<span class="tiny">${esc(c.fix || "")}</span>`) }], d.checks.filter((c) => c.area === a)), { flush: true })).join("")}</div>
+    <div style="margin-top:16px">${card("Secrets vault keys", `<p class="small">Gateway passwords, tokens and MFA seeds are encrypted with the vault key ring (<span class="mono">${esc(d.vault.file)}</span>).
+        Rotating adds a new key and re-encrypts every stored value; retire the old keys once backups taken with them are no longer needed.</p>
+      ${table([{ label: "Key", render: (k) => `<span class="mono">${esc(k.id)}</span>` }, { label: "Created", render: (k) => esc(k.created) }, { label: "", render: (k) => (k.primary ? chip("PRIMARY", "ok") : chip("DECRYPT ONLY", "neutral")) }], d.vault.keys, { empty: "No key ring yet - the key is derived from the server secret. Rotate to create one." })}`,
+      { actions: '<button class="btn sm" id="retire">Retire old keys</button><button class="btn sm primary" id="rotate">Rotate vault key</button>' })}</div>
+    <p class="tiny muted" style="margin-top:10px">Checked ${fmtRel(d.checked_at)}. Run <span class="code">python deploy/security/scan.py</span> before each release to add the code and dependency scan to this report.</p>`;
+  const rot = box.querySelector("#rotate");
+  rot.onclick = async () => {
+    if (!(await confirmDialog("Rotate the vault key", "A new key encrypts all stored secrets and MFA seeds. Keep a backup of the key ring file with your server backups.", "Rotate"))) return;
+    busy(rot, async () => { try { const r = await api.post("/security/vault/rotate"); toast(`Re-encrypted ${r.secrets} secret(s) and ${r.mfa_seeds} MFA seed(s) with ${r.primary}`); security(box); } catch (e) { errToast(e); } });
+  };
+  const ret = box.querySelector("#retire");
+  ret.onclick = () => busy(ret, async () => { try { const r = await api.post("/security/vault/retire"); toast(`${r.retired} old key(s) retired`); security(box); } catch (e) { errToast(e); } });
 }

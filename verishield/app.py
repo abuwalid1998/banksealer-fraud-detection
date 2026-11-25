@@ -14,13 +14,20 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from . import __version__
-from .api import admin, auth, cases, core, governance, system
+from .api import admin, auth, cases, core, corebank, governance, intel, platform, system
+from .models import Tenant
 from .services.metrics import metrics
 from .settings import settings
 
 log = logging.getLogger("verishield")
 WEB = Path(__file__).resolve().parent / "web"
 MAX_BODY = 110 * 1024 * 1024
+# Content Security Policy: scripts only from this server (no inline scripts, no eval); the Inter web font is
+# optional (the UI falls back to system fonts on servers without internet access)
+CSP = ("default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
+       "font-src 'self' https://fonts.gstatic.com data:; img-src 'self' data: blob:; connect-src 'self'; "
+       "object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'")
+DOCS_CSP = CSP.replace("script-src 'self'", "script-src 'self' 'unsafe-inline'")
 
 
 class _Jobs:
@@ -38,15 +45,44 @@ class _Jobs:
         from .db import SessionLocal
         from .services import decision, engine_registry
         last_save = last_health = time.time()
+        last_ctr = last_network = last_cra = 0.0
+        from .services import cluster
         while not self.stop.wait(30):
+            if not cluster.is_leader():
+                continue                  # another node of the cluster runs the background jobs
             try:
                 with SessionLocal() as db:
                     decision.expire_holds(db)
-                if time.time() - last_health > 1800:
-                    from .services import model_ops
-                    with SessionLocal() as db:
+                with SessionLocal() as db:
+                    from .services import cases as case_service
+                    from .services import confirmations, operations
+                    confirmations.expire(db)
+                    operations.run_due_schedules(db)
+                    from .services import siem
+                    siem.forward(db)
+                    if time.time() - last_ctr > 3600:
+                        from .services import ctr
+                        ctr.run_due(db)
+                        last_ctr = time.time()
+                    if time.time() - last_network > 1800:
+                        from .services import network
+                        network.run_all(db)
+                        last_network = time.time()
+                    if time.time() - last_cra > 86400:
+                        from .services import cra
+                        for t in db.execute(__import__("sqlalchemy").select(Tenant)).scalars().all():
+                            for space in ("LIVE", "DEMO"):
+                                cra.run_all(db, t, space)
+                        last_cra = time.time()
+                    if time.time() - last_health > 1800:
+                        from .services import model_ops
                         model_ops.check_all(db)
-                    last_health = time.time()
+                        case_service.escalate_due(db)
+                        operations.check_quality(db)
+                        for t in db.execute(__import__("sqlalchemy").select(Tenant)).scalars():
+                            operations.schedule_reviews(db, t.id, "LIVE")
+                            operations.schedule_reviews(db, t.id, "DEMO")
+                        last_health = time.time()
                 if time.time() - last_save > 300:
                     engine_registry.save_all()
                     last_save = time.time()
@@ -66,12 +102,17 @@ async def lifespan(app: FastAPI):
     from .services import engine_registry
     from .services.connectors import runtime
 
+    from .services import cluster
+
     summary = initialise()
     app.state.bootstrap = summary
     jobs.start()
+    if settings.background_jobs:
+        cluster.heartbeat_thread.start()
     log.info("VeriShield %s ready (%s, tenant %s)", __version__, settings.env, settings.tenant_code)
     yield
     jobs.shutdown()
+    cluster.heartbeat_thread.shutdown()
     runtime.stop_all()
     engine_registry.save_all()
 
@@ -106,11 +147,15 @@ def create_app() -> FastAPI:
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["X-Frame-Options"] = "DENY"
         response.headers["Referrer-Policy"] = "no-referrer"
+        response.headers["Content-Security-Policy"] = DOCS_CSP if path == "/api/docs" else CSP
+        response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=(), payment=(), usb=()"
+        response.headers["Cross-Origin-Opener-Policy"] = "same-origin"
+        response.headers["Cross-Origin-Resource-Policy"] = "same-origin"
         response.headers["X-Response-Time-ms"] = f"{ms:.1f}"
         if path.startswith("/api/"):
             response.headers["Cache-Control"] = "no-store"
-        if settings.ssl_certfile:
-            response.headers["Strict-Transport-Security"] = "max-age=31536000"
+        if settings.ssl_certfile or settings.trust_proxy:
+            response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
         return response
 
     @app.exception_handler(RequestValidationError)
@@ -129,7 +174,7 @@ def create_app() -> FastAPI:
         return JSONResponse({"detail": {"code": "INTERNAL_ERROR", "message": "Unexpected error - see server log",
                                         "type": type(exc).__name__}}, 500)
 
-    for module in (auth, admin, core, cases, governance, system):
+    for module in (corebank, platform, intel, auth, admin, core, cases, governance, system):
         app.include_router(module.router)
     app.include_router(admin.health_router)
     app.include_router(system.mcp_router)

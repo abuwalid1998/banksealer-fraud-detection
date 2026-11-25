@@ -37,6 +37,10 @@ SCOPE_PERMISSIONS = {
     "policies:simulate": {"policies.view", "policies.simulate"},
     "read:executive": {"system.summary", "models.view", "models.clusters"},
     "mcp:use": {"mcp.use"},
+    # mobile / internet banking backend: customer answers in the app, card freeze, onboarding risk rating
+    "confirmations:respond": {"confirmations.respond"},
+    "cards:control": {"cards.customer"},
+    "customers:risk": {"customers.risk_assess"},
 }
 API_SCOPES = tuple(SCOPE_PERMISSIONS)
 
@@ -119,7 +123,10 @@ rate_limiter = RateLimiter()
 def _from_api_key(db: Session, key: str, request: Request) -> Principal:
     prefix = key.split(".", 1)[0]
     client = db.execute(select(ApiClient).where(ApiClient.key_prefix == prefix)).scalar()
-    if client is None or not client.active or client.key_hash != token_hash(key):
+    hashed = token_hash(key) if client is not None else ""
+    in_grace = (client is not None and client.previous_key_hash == hashed and client.previous_expires_at is not None
+                and client.previous_expires_at > utcnow())
+    if client is None or not client.active or (client.key_hash != hashed and not in_grace):
         raise HTTPException(401, {"code": "INVALID_API_KEY", "message": "API key is invalid or revoked"})
     if not rate_limiter.allow(f"api:{client.id}", client.rate_limit_per_minute):
         raise HTTPException(429, {"code": "RATE_LIMITED", "message": "rate limit exceeded; retry later"})

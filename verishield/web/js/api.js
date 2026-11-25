@@ -21,7 +21,7 @@ export const api = {
     else if (body !== undefined) { headers["Content-Type"] = "application/json"; payload = JSON.stringify(body); }
     let res;
     try {
-      res = await fetch(path.startsWith("/api") || path.startsWith("/health") ? path : `/api/v1${path}`,
+      res = await fetch(path.startsWith("/api/") || path.startsWith("/health") ? path : `/api/v1${path}`,
         { method, headers, body: payload });
     } catch (e) {
       throw new ApiError("Cannot reach the VeriShield server - is it running?", 0);

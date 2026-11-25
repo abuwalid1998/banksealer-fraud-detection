@@ -74,6 +74,18 @@ const P = {
   heart: "M12 20s-7-4.4-7-10a4 4 0 0 1 7-2.6A4 4 0 0 1 19 10c0 5.6-7 10-7 10z",
   sliders: "M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3M1 14h6M9 8h6M17 16h6",
   shield: "M12 3 4 7v6c0 4.4 3.4 7.6 8 8.5 4.6-.9 8-4.1 8-8.5V7z",
+  screening: "M10.5 18a7.5 7.5 0 1 1 0-15 7.5 7.5 0 0 1 0 15zm10.5 3-5.2-5.2M7.5 10.5h6M10.5 7.5v6",
+  reviews: "M9 11l2 2 4-4M5 4h14v17H5zM9 2h6v4H9z",
+  str: "M6 3h9l4 4v14H6zM14 3v5h5M9 13h7M9 17h5",
+  network: "M6 6a2 2 0 1 0 0-.01M18 6a2 2 0 1 0 0-.01M12 18a2 2 0 1 0 0-.01M7.5 7.5l3.4 8.8M16.5 7.5l-3.4 8.8M8 6h8",
+  networks: "M5 7a2 2 0 1 0 0-.01M19 7a2 2 0 1 0 0-.01M12 19a2 2 0 1 0 0-.01M5 19a2 2 0 1 0 0-.01M7 7h10M6 9l5 8M18 9l-5 8M7 19h3",
+  cheques: "M3 7h18v10H3zM6 11h7M6 14h4M15 14h3M17 7V5",
+  card: "M3 6h18v12H3zM3 10h18M7 15h4",
+  lock: "M7 11V8a5 5 0 0 1 10 0v3M5 11h14v10H5z",
+  shield: "M12 3l8 3v6c0 4.5-3.4 8.3-8 9-4.6-.7-8-4.5-8-9V6z",
+  server: "M4 4h16v6H4zM4 14h16v6H4zM8 7h.01M8 17h.01",
+  core: "M3 10l9-6 9 6M5 10v9M19 10v9M9 10v9M15 10v9M3 21h18",
+  sparkle: "M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8zM19 16l.8 2.2L22 19l-2.2.8L19 22l-.8-2.2L16 19l2.2-.8z",
 };
 export function icon(name, extra = "") {
   return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" ${extra}><path d="${P[name] || P.empty}"/></svg>`;
@@ -345,4 +357,91 @@ export function trendChart(rows, { key = "count", key2 = null, labelKey = "day",
   const dots = rows.map((r, i) => `<circle cx="${x(i)}" cy="${y(r[key])}" r="2.5" fill="${color}"><title>${esc(r[labelKey])}: ${fmt(r[key])}${key2 ? ` · ${esc(label(key2))}: ${fmtNum(r[key2])}` : ""}</title></circle>`).join("");
   const gid = "g" + Math.random().toString(36).slice(2, 8);
   return `<div class="chart"><svg viewBox="0 0 ${W} ${H}"><defs><linearGradient id="${gid}" x1="0" x2="0" y1="0" y2="1"><stop offset="0" stop-color="${color}" stop-opacity=".28"/><stop offset="1" stop-color="${color}" stop-opacity="0"/></linearGradient></defs>${grid}<path d="${area}" fill="url(#${gid})"/><path d="${line}" fill="none" stroke="${color}" stroke-width="2.2"/>${second}${dots}${ticks}</svg></div>`;
+}
+
+// ---------- network graph (force-directed, dependency-free) ----------
+// data: {nodes: [{id, kind, label, name?, risk?, alerts?, focus?, watched?}], edges: [{source, target, kind, count, fraud}]}
+export function networkGraph(data, { height = 520, onNode } = {}) {
+  const nodes = data.nodes.map((n) => ({ ...n }));
+  if (!nodes.length) return empty("No linked accounts in this period.");
+  const W = 900, H = height;
+  const idx = Object.fromEntries(nodes.map((n, i) => [n.id, i]));
+  const edges = data.edges.filter((e) => e.source in idx && e.target in idx);
+  nodes.forEach((n, i) => {
+    const a = (i / nodes.length) * Math.PI * 2;
+    n.x = W / 2 + Math.cos(a) * (n.focus ? 0 : 180 + (i % 5) * 18);
+    n.y = H / 2 + Math.sin(a) * (n.focus ? 0 : 150 + (i % 7) * 12);
+  });
+  for (let it = 0; it < 260; it++) {
+    const t = 1 - it / 260;
+    for (let i = 0; i < nodes.length; i++) {
+      for (let j = i + 1; j < nodes.length; j++) {
+        const a = nodes[i], b = nodes[j];
+        let dx = a.x - b.x, dy = a.y - b.y; let d2 = dx * dx + dy * dy || 0.01;
+        if (d2 > 90000) continue;
+        const f = 1800 / d2; const d = Math.sqrt(d2);
+        dx /= d; dy /= d; a.x += dx * f * t; a.y += dy * f * t; b.x -= dx * f * t; b.y -= dy * f * t;
+      }
+    }
+    edges.forEach((e) => {
+      const a = nodes[idx[e.source]], b = nodes[idx[e.target]];
+      const dx = b.x - a.x, dy = b.y - a.y, d = Math.sqrt(dx * dx + dy * dy) || 1, k = (d - 70) * 0.02 * t;
+      a.x += (dx / d) * k; a.y += (dy / d) * k; b.x -= (dx / d) * k; b.y -= (dy / d) * k;
+    });
+    nodes.forEach((n) => {
+      if (n.focus) { n.x += (W / 2 - n.x) * 0.2; n.y += (H / 2 - n.y) * 0.2; }
+      n.x += (W / 2 - n.x) * 0.004; n.y += (H / 2 - n.y) * 0.004;
+      n.x = Math.max(24, Math.min(W - 24, n.x)); n.y = Math.max(20, Math.min(H - 20, n.y));
+    });
+  }
+  const color = { customer: "#3569C8", counterparty: "#0BAA9B", device: "#5B3D8C", ip: "#E8A33A" };
+  const lines = edges.map((e) => {
+    const a = nodes[idx[e.source]], b = nodes[idx[e.target]];
+    return `<line x1="${a.x.toFixed(1)}" y1="${a.y.toFixed(1)}" x2="${b.x.toFixed(1)}" y2="${b.y.toFixed(1)}" stroke="${e.fraud ? "#C84B55" : "#B7C3D3"}" stroke-width="${Math.min(4, 1 + Math.log2(e.count || 1))}" ${e.direction === "in" ? 'stroke-dasharray="4 3"' : ""}><title>${esc(e.kind)} · ${e.count} operation(s)${e.amount ? ` · ${fmtNum(e.amount, 0)}` : ""}</title></line>`;
+  }).join("");
+  const shapes = nodes.map((n, i) => {
+    const c = n.kind === "customer" ? (n.risk === "HIGH" ? "#C84B55" : color.customer) : color[n.kind] || "#999";
+    const r = n.kind === "customer" ? (n.focus ? 13 : 8 + Math.min(5, n.alerts || 0)) : 6;
+    const shape = n.kind === "customer" ? `<circle r="${r}" fill="${c}" stroke="${n.focus ? "#10233F" : "#fff"}" stroke-width="${n.focus ? 3 : 1.5}"/>`
+      : `<rect x="-${r}" y="-${r}" width="${2 * r}" height="${2 * r}" rx="2" fill="${c}" stroke="${n.watched ? "#C84B55" : "#fff"}" stroke-width="${n.watched ? 3 : 1.2}" transform="rotate(45)"/>`;
+    const showLabel = nodes.length <= 40 || n.focus || n.alerts || n.watched || n.kind !== "customer";
+    const text = !showLabel ? "" : n.kind === "customer" ? `${n.label}${n.name ? " · " + n.name : ""}` : String(n.label).slice(0, 22);
+    return `<g data-n="${i}" transform="translate(${n.x.toFixed(1)},${n.y.toFixed(1)})" style="cursor:${n.kind === "customer" ? "pointer" : "default"}">${shape}
+      <text y="${r + 11}" text-anchor="middle" style="font-size:9.5px;fill:var(--ink-2)">${esc(text.length > 30 ? text.slice(0, 29) + "…" : text)}</text>
+      <title>${esc(n.kind)}: ${esc(n.label)}${n.name ? " – " + esc(n.name) : ""}${n.alerts ? ` · ${n.alerts} alert(s)` : ""}${n.watched ? " · WATCH-LISTED" : ""}</title></g>`;
+  }).join("");
+  const id = "ng" + Math.random().toString(36).slice(2, 8);
+  setTimeout(() => {
+    const svg = document.getElementById(id); if (!svg || !onNode) return;
+    svg.addEventListener("click", (e) => { const g = e.target.closest("g[data-n]"); if (g) onNode(nodes[+g.dataset.n]); });
+  });
+  const legend = `<div class="legend"><span><i style="background:${color.customer}"></i>Customer</span><span><i style="background:#C84B55"></i>High-risk customer / confirmed fraud link</span>
+    <span><i style="background:${color.counterparty}"></i>Counterparty account</span><span><i style="background:${color.device}"></i>Device</span><span><i style="background:${color.ip}"></i>IP address</span><span>dashed = money in</span></div>`;
+  return `<div class="chart"><svg id="${id}" viewBox="0 0 ${W} ${H}" style="background:linear-gradient(#FBFCFE,#F6F8FB);border:1px solid var(--line-2);border-radius:10px">${lines}${shapes}</svg>${legend}</div>`;
+}
+
+// ---------- city heat map (schematic map of Palestinian cities) ----------
+const CITY_POS = { Jenin: [35.30, 32.46], Tubas: [35.37, 32.32], Tulkarm: [35.03, 32.31], Nablus: [35.26, 32.22], Qalqilya: [34.97, 32.19],
+  Salfit: [35.18, 32.08], Ramallah: [35.20, 31.90], "Al-Bireh": [35.22, 31.91], Jericho: [35.45, 31.86], Jerusalem: [35.23, 31.78],
+  Bethlehem: [35.20, 31.70], Hebron: [35.10, 31.53], Gaza: [34.46, 31.50], "Khan Younis": [34.31, 31.35], Rafah: [34.25, 31.29] };
+export function cityHeatMap(rows, { valueKey = "count", rateKey = null, height = 360 } = {}) {
+  const items = rows.filter((r) => CITY_POS[r.city]);
+  if (!items.length) return empty("No city information in this period.");
+  const W = 360, H = height;
+  const x = (lon) => 30 + ((lon - 34.15) / (35.6 - 34.15)) * (W - 60);
+  const y = (lat) => 20 + ((32.6 - lat) / (32.6 - 31.2)) * (H - 40);
+  const max = Math.max(...items.map((r) => r[valueKey] || 0), 1);
+  const maxRate = rateKey ? Math.max(...items.map((r) => r[rateKey] || 0), 0.0001) : 1;
+  const heat = (v) => { const t = Math.min(1, v); return `rgb(${Math.round(11 + 189 * t)},${Math.round(170 - 95 * t)},${Math.round(155 - 70 * t)})`; };
+  const outline = `<path d="M${x(35.55)},${y(32.55)} L${x(34.95)},${y(32.45)} L${x(34.92)},${y(32.05)} L${x(35.05)},${y(31.55)} L${x(35.25)},${y(31.35)} L${x(35.55)},${y(31.45)} L${x(35.57)},${y(31.85)} Z" fill="#EEF3F8" stroke="#C9D3DE"/>
+    <path d="M${x(34.55)},${y(31.6)} L${x(34.2)},${y(31.32)} L${x(34.25)},${y(31.22)} L${x(34.5)},${y(31.45)} Z" fill="#EEF3F8" stroke="#C9D3DE"/>`;
+  const dots = items.map((r) => {
+    const [lon, lat] = CITY_POS[r.city];
+    const rad = 6 + 18 * Math.sqrt((r[valueKey] || 0) / max);
+    const fill = heat(rateKey ? (r[rateKey] || 0) / maxRate : (r[valueKey] || 0) / max);
+    return `<g transform="translate(${x(lon).toFixed(1)},${y(lat).toFixed(1)})"><circle r="${rad.toFixed(1)}" fill="${fill}" fill-opacity=".8" stroke="#fff" stroke-width="1.5"><title>${esc(r.city)}: ${fmtNum(r[valueKey])}${rateKey ? ` · ${(100 * (r[rateKey] || 0)).toFixed(1)}% intervention rate` : ""}</title></circle>
+      <text y="${(rad + 11).toFixed(1)}" text-anchor="middle" style="font-size:10px;fill:var(--ink-2)">${esc(r.city)}</text></g>`;
+  }).join("");
+  return `<div class="chart"><svg viewBox="0 0 ${W} ${H}" style="max-height:${H}px">${outline}${dots}</svg>
+    <div class="legend"><span>circle size = ${rateKey ? "transactions" : "volume"}</span><span><i style="background:${heat(0)}"></i>low</span><span><i style="background:${heat(1)}"></i>high ${rateKey ? "intervention rate" : ""}</span></div></div>`;
 }

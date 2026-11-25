@@ -41,6 +41,13 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "bank_transfer": {"amount": 1.0, "iban": 1.0, "iban_cc": 1.2, "cc_asn": 1.0, "ip": 0.4, "hour": 0.6},
             "phone_recharge": {"amount": 1.0, "phone_number": 1.0, "operator": 0.5, "cc_asn": 1.0, "ip": 0.4, "hour": 0.6},
             "prepaid_card": {"amount": 1.0, "card_id": 1.0, "cc_asn": 1.0, "ip": 0.4, "hour": 0.6},
+            "card_payment": {"amount": 1.0, "merchant": 0.6, "mcc": 0.8, "merchant_cc": 1.2, "entry_mode": 0.6,
+                             "hour": 0.5},
+            "cash_withdrawal": {"amount": 1.0, "terminal": 0.6, "location": 1.0, "hour": 0.6},
+            "cash_deposit": {"amount": 1.0, "terminal": 0.5, "location": 0.8, "hour": 0.4},
+            "incoming_transfer": {"amount": 1.0, "counterparty": 0.8, "counterparty_cc": 1.2, "hour": 0.3},
+            "cheque_deposit": {"amount": 1.0, "counterparty": 0.9, "drawer_bank": 0.6, "location": 0.5},
+            "cheque_payment": {"amount": 1.0, "counterparty": 0.8, "location": 0.4},
         },
     },
     "temporal": {

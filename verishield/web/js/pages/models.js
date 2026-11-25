@@ -1,12 +1,13 @@
 // Models & segments: fraud model registry (activate/shadow/rollback), segmentation, onboarding data quality & imports.
 import { api } from "../api.js";
 import { S, busy, card, chip, confirmDialog, errToast, esc, fmtDate, fmtNum, hbars, icon, kpi, kv, label, loading, modal,
-  options, table, toast } from "../ui.js";
+  options, stackedBars, table, toast } from "../ui.js";
 
 const can = (p) => S.me.permissions.includes(p);
 
 export async function render(el) {
-  const tabs = [["health", "Health & retraining"], ["fraud", "Fraud models"], ["segments", "Customer segments"], ["params", "Model settings"]];
+  const tabs = [["health", "Health & retraining"], ["fraud", "Fraud models"], ["learned", "Learning from outcomes"], ["challenger", "Champion vs challenger"],
+    ["segments", "Customer segments"], ["params", "Model settings"]];
   if (can("models.train") || can("models.view")) tabs.push(["onboarding", "Onboarding data"]);
   let cur = "health";
   const draw = async () => {
@@ -17,6 +18,8 @@ export async function render(el) {
       if (cur === "fraud") await fraud(box, draw);
       else if (cur === "health") await health(box, draw);
       else if (cur === "params") await params(box, draw);
+      else if (cur === "learned") await learned(box, draw);
+      else if (cur === "challenger") await challenger(box);
       else if (cur === "segments") await segments(box, draw);
       else await onboarding(box, draw);
     } catch (e) { errToast(e); }
@@ -231,4 +234,48 @@ async function params(box, redraw) {
     if (!(await confirmDialog("Reset model settings", "Restore every parameter to its default for the next training run?", "Reset"))) return;
     try { await api.put("/models/params", { reset: true }); toast("Defaults restored"); redraw(); } catch (err) { errToast(err); }
   };
+}
+
+// ------------------------------------------------------------------ learning from analyst outcomes
+async function learned(box, redraw) {
+  const d = await api.get("/models/learned");
+  const active = d.models.find((m) => m.status === "ACTIVE");
+  const enough = d.labels.fraud >= d.minimum.fraud && d.labels.legitimate >= d.minimum.legitimate;
+  box.innerHTML = `<div class="kpis">${kpi("Confirmed fraud labels", fmtNum(d.labels.fraud), `need ${d.minimum.fraud}`, d.labels.fraud >= d.minimum.fraud ? "accent" : "warn")}
+      ${kpi("Confirmed legitimate", fmtNum(d.labels.legitimate), `need ${d.minimum.legitimate}`)}
+      ${kpi("Active learned model", `<span style="font-size:16px">${esc(active ? active.id : "none")}</span>`, active ? `AUC ${active.metrics.holdout_auc ?? "–"}` : "")}</div>
+    ${d.demo_ground_truth ? '<div class="notice" style="margin-top:14px">Demo workspace: the simulator\'s ground truth is used as labels, so the model can be trained right away. In the live workspace labels come only from Manager dispositions, customer SMS answers and customer fraud reports.</div>' : ""}
+    <div class="grid g2" style="margin-top:16px">
+      ${card("How the team teaches the system", `<ul class="small" style="padding-left:18px"><li><b>Confirm fraud / reject</b> dispositions and customer <b>NO</b> answers or fraud reports label transactions as fraud.</li>
+        <li><b>False positive / no concern / release</b> and customer <b>YES</b> answers label them legitimate.</li>
+        <li>A logistic regression learns which combinations of engine scores, amount, product, time and geography the team confirmed as fraud. It adds the signal <span class="code">LEARNED_FRAUD_PATTERN</span> (REVIEW or HOLD by policy) on top of the behavioural engine – it never replaces it.</li></ul>
+        ${d.can_train ? `<div class="row" style="margin-top:12px"><button class="btn primary" id="train" ${enough || d.demo_ground_truth ? "" : "disabled"}>Train on confirmed outcomes</button>${active ? '<button class="btn" id="off">Switch off</button>' : ""}</div>` : ""}`)}
+      ${card("Model versions", table([{ label: "Model", render: (m) => `<b class="mono small">${esc(m.id)}</b>` }, { label: "Status", render: (m) => chip(m.status) },
+        { label: "Labels", render: (m) => `${fmtNum(m.metrics.positives)} / ${fmtNum(m.metrics.negatives)}` }, { label: "AUC", num: true, render: (m) => m.metrics.holdout_auc ?? "–" },
+        { label: "Precision / recall @0.7", render: (m) => `${m.metrics.holdout_precision_at_0_7 ?? "–"} / ${m.metrics.holdout_recall_at_0_7 ?? "–"}` },
+        { label: "Trained", render: (m) => fmtDate(m.trained_at) }, { label: "", render: (m) => d.can_train && m.status !== "ACTIVE" ? `<button class="btn sm" data-act="${esc(m.id)}">Activate</button>` : "" }],
+        d.models, { empty: "Not trained yet." }), { flush: true })}</div>
+    ${active ? `<div style="margin-top:16px">${card(`What ${esc(active.id)} learned (strongest weights)`, hbars(active.metrics.top_weights.map(([k, v]) => ({ label: `${label(k)} ${v > 0 ? "↑ fraud" : "↓ fraud"}`, value: Math.abs(v), color: v > 0 ? "#C84B55" : "#0BAA9B" })), { fmt: (v) => v.toFixed(2) }))}</div>` : ""}`;
+  const t = box.querySelector("#train");
+  if (t) t.onclick = () => busy(t, async () => { try { const m = await api.post("/models/learned/train", { activate: true }); toast(`${m.id} trained and active (AUC ${m.metrics.holdout_auc ?? "–"})`); redraw(); } catch (e) { errToast(e); } });
+  const off = box.querySelector("#off");
+  if (off) off.onclick = () => busy(off, async () => { try { await api.post("/models/learned/deactivate"); toast("Learned model switched off"); redraw(); } catch (e) { errToast(e); } });
+  box.querySelectorAll("[data-act]").forEach((b) => (b.onclick = () => busy(b, async () => { try { await api.post("/models/learned/activate", { model_id: b.dataset.act }); toast("Activated"); redraw(); } catch (e) { errToast(e); } })));
+}
+
+// ------------------------------------------------------------------ champion vs challenger
+async function challenger(box) {
+  const d = await api.get("/models/challenger");
+  if (!d.pairs) { box.innerHTML = `<div class="notice">${esc(d.note)}</div>`; return; }
+  const pc = d.performance.champion, ph = d.performance.challenger;
+  box.innerHTML = `<div class="kpis">${kpi("Decisions compared", fmtNum(d.pairs), `${esc(d.champion)} vs ${esc(d.challenger)}`, "accent")}
+      ${kpi("Risk-level agreement", `${d.risk_level_agreement}%`)}${kpi("Score correlation", d.score_correlation ?? "–")}
+      ${kpi("Would alert (score ≥ 0.5)", `${fmtNum(d.would_alert.champion)} / ${fmtNum(d.would_alert.challenger)}`, "champion / challenger")}</div>
+    <div class="grid g2" style="margin-top:16px">
+      ${card("Score distribution", stackedBars(d.distribution.map((x) => ({ day: `.....${x.bin}`, CHAMPION: x.champion, CHALLENGER: x.challenger })), ["CHAMPION", "CHALLENGER"], { colors: { CHAMPION: "#3569C8", CHALLENGER: "#E8A33A" } }))}
+      ${card("Accuracy on confirmed outcomes", pc ? table([{ label: "Model", key: "m" }, { label: "Precision", num: true, render: (r) => r.precision ?? "–" }, { label: "Recall", num: true, render: (r) => r.recall ?? "–" },
+        { label: "Alerts", num: true, key: "alerts" }, { label: "Labelled", num: true, key: "labelled" }], [{ m: `Champion ${d.champion}`, ...pc }, { m: `Challenger ${d.challenger}`, ...ph }])
+        : '<p class="muted small">No labelled outcomes yet.</p>', { sub: "Activate the challenger under Fraud models when it is better" })}</div>
+    <div style="margin-top:16px">${card("Where they disagree", table([{ label: "Champion", render: (r) => `${chip(r.champion_level)} ${r.champion_score}` }, { label: "Challenger", render: (r) => `${chip(r.challenger_level)} ${r.challenger_score}` },
+      { label: "Outcome", render: (r) => r.truth == null ? "–" : r.truth ? chip("FRAUD", "crit") : chip("LEGITIMATE", "ok") }], d.disagreements, { empty: "No disagreements." }), { flush: true })}</div>`;
 }

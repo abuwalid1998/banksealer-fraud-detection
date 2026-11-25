@@ -111,15 +111,49 @@ def evaluate(ctx: TxContext, customer: Optional[Customer], cfg: dict, high_risk_
 
     # Shared / concentrated counterparty across customers.
     min_customers = int(cfg.get("shared_counterparty_customers", 3))
-    shared = ctx.shared_counterparty(int(cfg.get("shared_counterparty_days", 7)))
+    # (only person-to-person transfers: many customers paying the same shop, ATM or employer is normal)
+    shared = ctx.shared_counterparty(int(cfg.get("shared_counterparty_days", 7))) \
+        if tx.tx_type == "bank_transfer" else 0
     if shared >= min_customers:
         indicators.append({"code": "SHARED_COUNTERPARTY", "weight": 0.45,
                            "message": f"Beneficiary received funds from {shared} different customers within "
                                       f"{cfg.get('shared_counterparty_days', 7)} days"})
 
+    # Mule / pass-through: money received from several NEW senders leaves again quickly (individuals - businesses
+    # receive from many clients and pay suppliers as a matter of course).
+    individual = customer is None or customer.customer_type != "BUSINESS"
+    if tx.tx_type in ("bank_transfer", "cash_withdrawal") and individual:
+        hours = float(cfg.get("passthrough_hours", 48))
+        rec = ctx.recent(hours)
+        window_start = tx.timestamp - timedelta(hours=hours)
+        known = {r.beneficiary for r in ctx.recent(24 * 31) if r.ts < window_start}
+        inflow = sum(r.amount for r in rec if r.tx_type in ("incoming_transfer", "cash_deposit")
+                     and r.beneficiary not in known)
+        senders = {r.beneficiary for r in rec if r.tx_type == "incoming_transfer" and r.beneficiary
+                   and r.beneficiary not in known}
+        outflow = sum(r.amount for r in rec if r.tx_type in ("bank_transfer", "cash_withdrawal")) + tx.amount
+        if inflow >= float(cfg.get("passthrough_min_inflow", 3000)) and \
+                outflow >= float(cfg.get("passthrough_ratio", 0.8)) * inflow and \
+                len(senders) >= int(cfg.get("passthrough_min_senders", 2)):
+            indicators.append({"code": "RAPID_PASS_THROUGH", "weight": 0.5,
+                               "message": f"{inflow:,.2f} received from {len(senders)} senders within {hours:.0f}h "
+                                          f"and {outflow:,.2f} sent out again (mule / pass-through pattern)"})
+    if tx.tx_type == "incoming_transfer" and individual:
+        days = int(cfg.get("originators_days", 7))
+        start = tx.timestamp - timedelta(days=days)
+        all_recent = ctx.recent(24 * 31)
+        known = {r.beneficiary for r in all_recent if r.ts < start}
+        senders = {r.beneficiary for r in all_recent if r.ts >= start and r.tx_type == "incoming_transfer"
+                   and r.beneficiary and r.beneficiary not in known}
+        if tx.beneficiary not in known:
+            senders.add(tx.beneficiary)
+        if len(senders) >= int(cfg.get("many_originators", 3)):
+            indicators.append({"code": "MANY_ORIGINATORS", "weight": 0.4,
+                               "message": f"Funds received from {len(senders)} new senders within {days} days"})
+
     # High-risk jurisdiction.
     hrc = {c.upper() for c in high_risk_countries or []}
-    hit = sorted({c for c in (tx.iban_cc, tx.ip_country) if c and c.upper() in hrc})
+    hit = sorted({c for c in (tx.counterparty_country, tx.ip_country) if c and c.upper() in hrc})
     if hit:
         indicators.append({"code": "HIGH_RISK_JURISDICTION", "weight": 0.3,
                            "message": f"Involves high-risk jurisdiction(s) {', '.join(hit)}"})

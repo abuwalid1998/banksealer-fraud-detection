@@ -15,6 +15,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from .models import AuditEvent, utcnow
+from .settings import settings
 
 _lock = threading.Lock()
 
@@ -46,6 +47,8 @@ def record(db: Session, tenant_id: str, action: str, *, actor: Any = None, resou
             ip = ip or getattr(actor, "ip", "") or ""
             space = getattr(actor, "space", space) or space
     with _lock:
+        if settings.cluster_mode:
+            _lock_chain(db, tenant_id)       # serialise appends across the nodes of a cluster
         prev = db.execute(select(AuditEvent.hash).where(AuditEvent.tenant_id == tenant_id)
                           .order_by(AuditEvent.id.desc()).limit(1)).scalar()
         ev = AuditEvent(tenant_id=tenant_id, space=space, actor_id=actor_id, actor_name=actor_name,
@@ -60,6 +63,24 @@ def record(db: Session, tenant_id: str, action: str, *, actor: Any = None, resou
         else:
             db.flush()
     return ev
+
+
+def _lock_chain(db: Session, tenant_id: str) -> None:
+    """Row lock on the tenant's chain head (PostgreSQL ``SELECT ... FOR UPDATE``) until the event is committed."""
+    from .models import Counter
+    row = db.execute(select(Counter).where(Counter.tenant_id == tenant_id, Counter.name == "audit_chain")
+                     .with_for_update()).scalar()
+    if row is None:
+        from sqlalchemy.exc import IntegrityError
+        try:
+            with db.begin_nested():
+                db.add(Counter(tenant_id=tenant_id, name="audit_chain", value=0))
+        except IntegrityError:
+            pass
+        row = db.execute(select(Counter).where(Counter.tenant_id == tenant_id, Counter.name == "audit_chain")
+                         .with_for_update()).scalar()
+    if row is not None:
+        row.value = (row.value or 0) + 1
 
 
 _SENSITIVE = ("password", "secret", "token", "key_hash", "mfa_secret", "api_key", "ciphertext")

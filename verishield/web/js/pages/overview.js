@@ -2,7 +2,7 @@
 import { api } from "../api.js";
 import { navigate } from "../app.js";
 import { COLORS, S, card, chip, codes, decisionChip, donut, empty, esc, fmtDate, fmtMoney, fmtNum, fmtRel, hbars,
-  icon, kpi, label, live, liveBadge, stackedBars, table, trendChart } from "../ui.js";
+  cityHeatMap, icon, kpi, label, live, liveBadge, stackedBars, table, trendChart } from "../ui.js";
 
 const OUT = ["PASS", "REVIEW", "HOLD", "DECLINE", "ERROR_POLICY"];
 
@@ -22,7 +22,7 @@ export async function render(el) {
         ${role === "IT_ADMIN" ? `<a href="#" data-go="#/integrations" class="btn teal">${icon("play")} Open Integrations &amp; Channels</a>` : ""}</div>` : "";
     if (role === "IT_ADMIN") el.innerHTML = hello + hint + itAdmin(d);
     else if (role === "AML_EMPLOYEE") el.innerHTML = hello + employee(d);
-    else if (role === "CEO") el.innerHTML = hello + hint + executive(d);
+    else if (role === "CEO") { el.innerHTML = hello + hint + executive(d); valueCard(el.querySelector("#value")); whatIf(el.querySelector("#whatif")); }
     else el.innerHTML = hello + hint + manager(d, role === "CHIEF_AML");
     el.querySelectorAll("[data-go]").forEach((a) => a.addEventListener("click", (e) => { e.preventDefault(); navigate(a.dataset.go); }));
   };
@@ -180,13 +180,14 @@ function executive(d) {
   <div class="grid g3" style="margin-top:16px">
     ${card("By channel", hbars(d.by_channel.map((c) => ({ label: label(c.channel), value: c.count }))))}
     ${card("By product", hbars(d.by_type.map((c) => ({ label: label(c.type), value: c.count, color: "#0BAA9B" }))))}
-    ${card("By city", hbars(d.by_city.map((c) => ({ label: c.city, value: c.count, color: "#5B3D8C" }))))}
+    ${card("Risk heat map by city", cityHeatMap(d.by_city, { valueKey: "count", rateKey: "rate" }), { sub: "size = transactions · colour = intervention rate" })}
   </div>
   <div class="grid g3" style="margin-top:16px">
     ${card("Customer risk (institution rating)", donut(["LOW", "MEDIUM", "HIGH"].map((r) => ({ label: label(r), value: d.customer_risk[r] || 0, color: COLORS[r === "HIGH" ? "DECLINE" : r] })).filter((x) => x.value), { centerLabel: "customers" }))}
     ${card("Customers by segment", hbars(d.segments.map((x) => ({ label: x.segment, value: x.customers, color: "#3569C8" }))), { actions: '<a href="#" data-go="#/clusters" class="btn sm">Clusters</a>' })}
     ${card("Open alerts by severity", hbars(["CRITICAL", "HIGH", "MEDIUM", "LOW"].map((x) => ({ label: label(x), value: d.alerts_by_severity[x] || 0, color: COLORS[x] }))))}
   </div>
+  <div class="grid g2" style="margin-top:16px"><div id="value"></div><div id="whatif"></div></div>
   <div class="grid g2" style="margin-top:16px">
     ${card("Customers with the most interventions", table([{ label: "Customer", render: (r) => `<a href="#/customers/${encodeURIComponent(r.customer_ref)}">${esc(r.customer_ref)}</a>` },
       { label: "Name", key: "name" }, { label: "Interventions", key: "interventions", num: true }, { label: "Highest score", num: true, render: (r) => Number(r.max_score).toFixed(2) }],
@@ -196,4 +197,45 @@ function executive(d) {
       <a href="#" data-go="#/reports" class="btn primary">${icon("reports")} Open reports</a>
       <p class="tiny muted" style="margin-top:10px">Platform: decision latency p50 ${sys.decision_p50_ms ?? "–"} ms · p95 ${sys.decision_p95_ms ?? "–"} ms · model ${esc(sys.active_model || "–")}</p>`)}
   </div>`;
+}
+
+let whatIfValue = 1.0;
+const cache = {};
+async function cached(path, ttl = 60000) {
+  const hit = cache[path];
+  if (hit && Date.now() - hit.at < ttl) return hit.data;
+  const data = await api.get(path);
+  cache[path] = { at: Date.now(), data };
+  return data;
+}
+async function valueCard(box) {
+  if (!box) return;
+  const v = await cached("/value?days=30").catch(() => null);
+  if (!v) return;
+  const cur = v.currency;
+  box.innerHTML = card("Money saved – last 30 days", `<div class="kpis" style="grid-template-columns:repeat(2,1fr)">
+      ${kpi("Fraud prevented", `${fmtNum(v.prevented_loss, 0)} <span style="font-size:12px">${esc(cur)}</span>`, "confirmed fraud stopped before execution", "accent")}
+      ${kpi("Net benefit", `${fmtNum(v.net_benefit, 0)} <span style="font-size:12px">${esc(cur)}</span>`, v.return_per_unit_cost ? `${v.return_per_unit_cost}× the alert-handling cost` : "after alert-handling cost")}
+      ${kpi("Cost per alert", `${fmtNum(v.cost_per_alert, 2)} ${esc(cur)}`, `${fmtNum(v.alerts)} alerts${v.false_positive_share != null ? ` · ${v.false_positive_share}% closed as false positive` : ""}`)}
+      ${kpi("Detection by value", v.detection_rate_by_value == null ? "–" : `${v.detection_rate_by_value}%`, `missed ${fmtNum(v.missed_fraud_value, 0)} ${esc(cur)}`)}</div>
+    <p class="tiny muted" style="margin-top:8px">Based on confirmed outcomes (dispositions, customer answers, reports). Assumptions: ${v.assumptions.minutes_per_alert} min per alert at ${fmtNum(v.assumptions.analyst_hourly_cost)} ${esc(cur)}/h.</p>`);
+}
+async function whatIf(box) {
+  if (!box) return;
+  const draw = async () => {
+    box.innerHTML = card("What if the policy were stricter or more lenient?", '<div class="loading"><span class="spin"></span></div>');
+    const w = await cached(`/what-if?strictness=${whatIfValue}&days=14`, 120000).catch(() => null);
+    if (!w) { box.innerHTML = ""; return; }
+    const delta = w.interventions.proposed - w.interventions.current;
+    box.innerHTML = card("What if the policy were stricter or more lenient?", `<label class="f">Strictness <span class="help">left = stricter thresholds (more alerts) · right = more lenient</span>
+        <input type="range" min="0.6" max="1.4" step="0.05" value="${whatIfValue}" id="wf"></label>
+      <div class="row small" style="justify-content:space-between"><span>stricter</span><b>${whatIfValue === 1 ? "current policy" : `thresholds × ${whatIfValue.toFixed(2)}`}</b><span>more lenient</span></div>
+      <div class="kpis" style="grid-template-columns:repeat(3,1fr);margin-top:10px">
+        ${kpi("Interventions (14 days)", `${fmtNum(w.interventions.proposed)}`, `now ${fmtNum(w.interventions.current)} (${delta >= 0 ? "+" : ""}${delta})`, delta > 0 ? "warn" : "")}
+        ${kpi("Analyst hours", `${w.analyst_hours.proposed}`, `now ${w.analyst_hours.current}`)}
+        ${kpi("Thresholds", `${w.thresholds.suspicious}`, `high ${w.thresholds.high} · critical ${w.thresholds.critical}`)}</div>
+      <p class="tiny muted" style="margin-top:8px">Replays the last ${w.evaluated} decisions with the changed thresholds – nothing is changed. The AML Manager turns a decision into a new policy version under Policies & Thresholds.</p>`);
+    box.querySelector("#wf").onchange = (e) => { whatIfValue = Number(e.target.value); draw(); };
+  };
+  draw();
 }

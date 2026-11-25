@@ -31,7 +31,9 @@ import numpy as np
 from ..models import Reason, Transaction
 
 FEATURES = ("bt_per_30d", "bt_amount_30d", "pr_per_30d", "pr_amount_30d", "pc_per_30d", "pc_amount_30d",
-            "mean_amount", "distinct_beneficiaries", "foreign_ratio", "night_ratio")
+            "mean_amount", "distinct_beneficiaries", "foreign_ratio", "night_ratio",
+            # added in 1.3 - appended so that models trained on the first ten features keep working
+            "cp_per_30d", "cp_amount_30d", "cash_out_30d", "cash_in_30d", "incoming_30d")
 LABELS = {
     "bt_per_30d": ("bank transfers per 30 days", "{:,.1f}"),
     "bt_amount_30d": ("transferred amount per 30 days", "{:,.2f}"),
@@ -43,9 +45,15 @@ LABELS = {
     "distinct_beneficiaries": ("distinct beneficiaries", "{:,.0f}"),
     "foreign_ratio": ("share of transfers to foreign IBANs", "{:.0%}"),
     "night_ratio": ("share of night-time operations", "{:.0%}"),
+    "cp_per_30d": ("card payments per 30 days", "{:,.1f}"),
+    "cp_amount_30d": ("card spending per 30 days", "{:,.2f}"),
+    "cash_out_30d": ("cash withdrawn per 30 days", "{:,.2f}"),
+    "cash_in_30d": ("cash deposited per 30 days", "{:,.2f}"),
+    "incoming_30d": ("money received per 30 days", "{:,.2f}"),
 }
-LOG_FEATURES = {0, 1, 2, 3, 4, 5, 6, 7}
-TYPE_INDEX = {"bank_transfer": (0, 1), "phone_recharge": (2, 3), "prepaid_card": (4, 5)}
+LOG_FEATURES = {0, 1, 2, 3, 4, 5, 6, 7, 10, 11, 12, 13, 14}
+TYPE_INDEX = {"bank_transfer": (0, 1), "phone_recharge": (2, 3), "prepaid_card": (4, 5), "card_payment": (10, 11)}
+AMOUNT_INDEX = {"cash_withdrawal": 12, "cash_deposit": 13, "incoming_transfer": 14}
 NIGHT = {0, 1, 2, 3, 4, 5}
 
 
@@ -86,6 +94,8 @@ class UserStats:
         v = np.zeros(len(FEATURES))
         for tx_type, (ci, ai) in TYPE_INDEX.items():
             v[ci] = self.counts.get(tx_type, 0) * factor
+            v[ai] = self.amounts.get(tx_type, 0.0) * factor
+        for tx_type, ai in AMOUNT_INDEX.items():
             v[ai] = self.amounts.get(tx_type, 0.0) * factor
         v[6] = sum(self.amounts.values()) / self.total if self.total else 0.0
         v[7] = len(self.beneficiaries)
@@ -168,10 +178,17 @@ class GlobalProfiler:
     def _transform(self, V: np.ndarray) -> np.ndarray:
         V = np.array(V, dtype=float, copy=True)
         for j in LOG_FEATURES:
-            V[..., j] = np.log1p(V[..., j])
+            if j < V.shape[-1]:
+                V[..., j] = np.log1p(V[..., j])
         return V
 
+    @property
+    def dim(self) -> int:
+        """Number of features this fitted model uses (older models: the first ten)."""
+        return len(self.mu) if getattr(self, "mu", None) is not None else len(FEATURES)
+
     def _whiten(self, V: np.ndarray) -> np.ndarray:
+        V = np.asarray(V)[..., :self.dim]
         Z = (self._transform(V) - self.mu) / self.sd
         return Z @ self.W
 
@@ -281,7 +298,7 @@ class GlobalProfiler:
             tmp.transfers, tmp.foreign, tmp.night, tmp.total, tmp.first = (
                 stats.transfers, stats.foreign, stats.night, stats.total, stats.first)
         tmp.add(tx, home or tmp.home or tx.ip_country)
-        v = tmp.vector(self._period(max(tx.timestamp, self.end) if self.end else tx.timestamp))
+        v = tmp.vector(self._period(max(tx.timestamp, self.end) if self.end else tx.timestamp))[:self.dim]
         x = self._whiten(v[None, :])[0]
         label = self.labels.get(tx.user_id)
         if label is None:

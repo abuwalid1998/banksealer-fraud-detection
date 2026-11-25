@@ -14,7 +14,7 @@ export async function render(el, { params }) {
       <select class="input" name="decision">${options(["PASS", "REVIEW", "HOLD", "DECLINE", "ERROR_POLICY"], f.decision, { blank: "All decisions" })}</select>
       <select class="input" name="risk_level">${options(["LOW", "MEDIUM", "HIGH", "CRITICAL"], "", { blank: "All risk levels" })}</select>
       <select class="input" name="mode">${options([["PRE_AUTH", "Pre-authorisation"], ["POST_EVENT", "Post-event"]], "", { blank: "All timings" })}</select>
-      <select class="input" name="tx_type">${options(["bank_transfer", "phone_recharge", "prepaid_card"], "", { blank: "All products" })}</select>
+      <select class="input" name="tx_type">${options(["bank_transfer", "phone_recharge", "prepaid_card", "card_payment", "cash_withdrawal", "cash_deposit", "incoming_transfer"], "", { blank: "All products" })}</select>
       <select class="input" name="execution_state">${options(["PENDING", "HELD", "AUTHORISED", "DECLINED", "SETTLED", "EXPIRED", "RELEASE_REQUESTED", "DECLINE_REQUESTED", "RECALLED"], f.execution_state, { blank: "All execution states" })}</select>
       <input class="input" type="date" name="date_from" title="From"><input class="input" type="date" name="date_to" title="To">
       <label class="check"><input type="checkbox" id="livechk" checked> <span class="livepill" id="livebadge"><i></i>LIVE</span></label>
@@ -67,6 +67,7 @@ export async function openTransaction(ref, onChange) {
   const actions = [];
   if (can("cases.create") && !masked) actions.push(`<button class="btn" data-act="case">Create case</button>`);
   if (d.can_bank_action) actions.push(`<button class="btn teal" data-act="release">Release</button><button class="btn danger" data-act="reject">Reject</button>`);
+  if (can("core.execute") && !masked) actions.push(`<button class="btn" data-act="core">Core banking action</button>`);
   if (!masked && (can("reports.aml") || can("reports.executive") || can("reports.assigned"))) actions.push(`<button class="btn" data-act="pdf">PDF report</button>`);
   const exec = d.execution_events.map((e) => `<li><div>${chip(e.state)} <span class="small">${esc(e.source)}</span>${e.actor ? ` · ${esc(e.actor)}` : ""}</div><div class="small">${esc(e.detail)}</div><div class="t">${fmtDate(e.created_at, { seconds: true })}</div></li>`).join("");
   dr.set(`<div class="dh"><div><h2>${esc(label(t.tx_type))} · ${fmtMoney(t.amount, t.currency)}</h2><div class="small muted mono">${esc(t.tx_ref)}</div></div>
@@ -79,7 +80,8 @@ export async function openTransaction(ref, onChange) {
         ${card("Transaction", kv([["Customer", masked ? esc(t.customer_ref) : `<a href="#/customers/${encodeURIComponent(t.customer_ref)}">${esc(t.customer_ref)}</a>`],
           ["Time", fmtDate(t.ts, { seconds: true })], ["Product", esc(label(t.tx_type))], ["Amount", fmtMoney(t.amount, t.currency)],
           ["Channel", esc(label(t.channel))], ["Source", esc(t.source)], ["Beneficiary", `<span class="mono">${esc(t.beneficiary)}</span>${t.beneficiary_name ? `<div class="small">${esc(t.beneficiary_name)}</div>` : ""}`],
-          t.purpose ? ["Purpose", esc(t.purpose)] : null, t.city ? ["City", esc(t.city)] : null, t.device ? ["Device", esc(t.device)] : null,
+          t.purpose ? ["Purpose", esc(t.purpose)] : null, t.merchant ? ["Merchant", `${esc(t.merchant)} <span class="tiny muted">MCC ${esc(t.mcc || "–")} · ${esc(t.entry_mode || "")}</span>`] : null,
+          t.terminal ? ["Terminal", esc(t.terminal)] : null, t.city ? ["City", esc(t.city)] : null, t.device ? ["Device", esc(t.device)] : null,
           ["Beneficiary country", esc(t.beneficiary_country)], ["Connection", esc(t.connection)], ["IP", esc(t.ip)],
           t.scenario ? ["Synthetic scenario", chip(t.scenario, "neutral")] : null]))}
         ${dec ? card("Decision", `<div class="scorebars">${scoreBar(dec.local_score, "Local (customer)")}${scoreBar(dec.temporal_score, "Temporal (24h window)")}${scoreBar(dec.global_score, "Global (peer group)")}${scoreBar(dec.fraud_score, "Combined fraud score")}</div>
@@ -99,6 +101,11 @@ export async function openTransaction(ref, onChange) {
     </div>`);
   dr.el.querySelectorAll("a[href^='#/']").forEach((a) => a.addEventListener("click", () => dr.close()));
   const act = (n) => dr.el.querySelector(`[data-act=${n}]`);
+  if (act("core")) act("core").onclick = async () => {
+    const { openCoreOperation } = await import("./core.js");
+    openCoreOperation({ purpose: t.execution_state === "SETTLED" || t.mode === "POST_EVENT" ? "REVERSE_TRANSACTION" : "",
+      inputs: { transaction_id: t.tx_ref, customer_id: t.customer_ref, amount: t.amount, currency: t.currency } });
+  };
   if (act("pdf")) act("pdf").onclick = (e) => busy(e.currentTarget, async () => {
     try { const j = await api.post("/reports", { type: "transaction_decision", format: "pdf", params: { tx_ref: t.tx_ref } });
       await api.download(`/reports/${encodeURIComponent(j.id)}/download`); } catch (err) { errToast(err); }

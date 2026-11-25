@@ -75,6 +75,91 @@ default on outside production). With `VERISHIELD_ENV=production` only the bootst
 temporary password must be changed at first sign-in. **Forgot password?** on the sign-in page sends a one-time code by
 e-mail or SMS (in development, when no gateway is switched on, the code is shown on screen).
 
+### Core banking APIs (IT Admin)
+
+Every operation VeriShield performs on the bank's core systems - release / reject a held payment, freeze or unfreeze
+a card, reverse a transaction, block an account, place a hold, suspend digital banking, read a balance or a
+transaction status - is a configurable **operation** with a **purpose**, on a **connection** (URL, API key / bearer /
+basic / OAuth2 / HMAC, mutual TLS, retries, idempotency). Request, response mapping and success rule are templates;
+manual operations can require a second person's approval; every call is logged and audited. See
+[CORE_BANKING_APIS.md](CORE_BANKING_APIS.md).
+
+### What's new in 1.4
+
+Before production
+* **High availability** - several application servers share one PostgreSQL database. Every server scores
+  decisions; a database lease elects one leader that runs the channels and background jobs and is taken over
+  within 30 s if the leader stops. Servers absorb each other's learning and share signed model checkpoints; the
+  audit chain is serialised with a row lock. *Operations › Cluster*; deployment guide in `deploy/ha/README.md`.
+* **Security hardening** - Content-Security-Policy and further browser security headers, vault key ring with
+  rotation and retirement, API-key rotation with a grace period, a scored **security posture** check for the IT
+  Admin (*Users & Settings › Security posture*), protected `/metrics`, XML upload protection, URL scheme checks and
+  HMAC-signed checkpoints. `deploy/security/scan.py` runs bandit + pip-audit before a release.
+
+Compliance
+* **Cash transaction reports (CTR)** - generated for every customer whose cash in or out reaches the reporting
+  threshold on a business day, in one operation or aggregated; review, exemption with reason, submission
+  reference, goAML-style XML / CSV / PDF export (*Regulatory Reports › Cash transaction reports*).
+* **Regulator statistics** - periodic AML statistics return (transactions monitored, decisions, alerts, cases and
+  handling time, STR, CTR, screening, confirmations, risk distribution, KYC reviews) on screen and as a PDF report.
+* **Customer risk assessment (CRA)** - weighted factors (geography, customer type, activity, products,
+  onboarding channel, PEP / sanctions, behaviour, adverse history incl. returned cheques, network risk, tenure),
+  minimum levels, onboarding API (`POST /api/v1/customers/risk-assessment`), daily re-assessment, overrides,
+  **four-eyes approval of downgrades**, history and an editable model (*Customer Reviews & Risk*).
+
+Detection
+* **Cheque fraud** - cheque deposits and own cheques are profiled by the engine; duplicate presentment, cheque-book
+  sequence anomalies (stolen books), bounced-cheque drawers, post-dated / stale cheques and kiting are detected;
+  returned cheques arrive as `cheque_return` events or are recorded on the *Cheques* page.
+* **Network risk scoring** - rings of customers linked by transfer payees, devices and IPs; risk propagated from
+  confirmed fraud, STR subjects, watch list and sanctions matches; live **mule-account score** of every payee in
+  the decision (*Networks & Mule Accounts*).
+
+Operations & customer experience
+* **Monitoring & SIEM** - audit and security events forwarded in order to the SIEM (syslog UDP / TCP / TLS with CEF
+  or JSON, or an HTTPS collector such as Splunk HEC), with a cursor so nothing is lost; business and cluster gauges
+  on `/metrics`; Grafana dashboard and Prometheus alert rules in `deploy/monitoring/`.
+* **In-app confirmation and card freeze** - held payments are confirmed in the bank's mobile app first (signed
+  webhook, `POST /api/v1/confirmations/{id}/respond`), with SMS as fallback; a NO on a card payment freezes the card
+  (command to the card system, and VeriShield declines the card while frozen); customers can freeze their own
+  cards; the AML team releases bank freezes.
+
+### What's new in 1.3
+
+Detection
+* **New transaction types** – card payments (POS / e-commerce, merchant, MCC, terminal), cash withdrawals (ATM /
+  branch), cash deposits and incoming transfers, with their own profile features, rules (card testing, night-time ATM
+  cash-out), AML typologies (rapid pass-through, many new originators) and demo data.
+* **Sanctions / PEP screening** – import OFAC SDN, UN and EU consolidated lists or a CSV; fuzzy matching that also
+  handles Arabic-script names; customers are screened on import and periodically, payments' beneficiaries before
+  execution. Matches become alerts and are resolved as true / false positive.
+* **Watch list** – accounts, devices, IP addresses and customers; a watched value holds the payment.
+* **Digital-banking login risk** – new device, new country, impossible travel, failed logins and recent password
+  resets feed the payment decision (login records arrive on the same channel as payments).
+* **Learning from outcomes** – analyst dispositions, customer answers and fraud reports label transactions; a
+  supervised model is trained on them and adds its probability to the decision (shadow first, then active).
+* **Champion vs challenger** and a **what-if** strictness slider replaying recent decisions under other thresholds.
+
+Investigation and compliance
+* **Customer confirmation by SMS** – held payments ask the customer YES / NO; YES releases, NO rejects, watch-lists
+  the payee and opens an urgent case. Branch / call-centre staff can record a **customer fraud report**.
+* **Case automation** – critical alerts open cases automatically, assignment by least-loaded or round robin, SLA
+  escalation; alert grouping and bulk closing.
+* **Network graph** of customers linked by shared transfer payees, devices and IP addresses (mule rings) and a
+  **customer 360 timeline**.
+* **STR / SAR workflow** – draft from the case, approval by the AML Manager or Chief, record of the FFU reference,
+  goAML-style XML and branded PDF export.
+* **AI assistant** (optional, OFF by default) – case summaries and STR narrative drafts with Claude, identifiers
+  masked before sending; without it a narrative is written from the case facts.
+* **Periodic customer reviews** – scheduled from the risk rating (6 / 12 / 36 months) or triggered, with checklist,
+  assignment and outcome.
+
+Operations
+* **Scheduled reports** e-mailed as PDF / Excel; **data-quality** checks per channel; **archiving** of old
+  transactions; **value metrics** (fraud prevented, net benefit, cost per alert) and a **risk heat map** for the CEO.
+* **Active Directory sign-in** with role mapping from AD groups (local accounts still work as a fallback).
+* After upgrading, run *Demo › Reset* once to load the new demo data types.
+
 ### What's new in 1.2
 
 * **IT Admin-started channels** and the **results database** writer (above); realistic gateway simulator.

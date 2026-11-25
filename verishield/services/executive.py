@@ -34,7 +34,7 @@ def overview(db: Session, tenant_id: str, space: str, days: int = 30) -> dict:
         by_day[d] = {"day": d, "count": 0, "value": 0.0, "interventions": 0}
     decisions, channels, types, cities = Counter(), defaultdict(lambda: [0, 0.0]), defaultdict(lambda: [0, 0.0]), \
         Counter()
-    risk, aml = Counter(), Counter()
+    risk, aml, city_iv = Counter(), Counter(), Counter()
     protected = reviewed = 0.0
     cust_score: dict[str, float] = defaultdict(float)
     cust_hits: Counter = Counter()
@@ -55,7 +55,10 @@ def overview(db: Session, tenant_id: str, space: str, days: int = 30) -> dict:
         channels[channel or "other"][1] += amount
         types[tx_type][0] += 1
         types[tx_type][1] += amount
-        cities[(details or {}).get("city") or "Not provided"] += 1
+        city = (details or {}).get("city") or (details or {}).get("location") or "Not provided"
+        cities[city] += 1
+        if dec in INTERVENTIONS:
+            city_iv[city] += 1
         risk[lvl] += 1
         if aml_lvl and aml_lvl != "NONE":
             aml[aml_lvl] += 1
@@ -117,7 +120,8 @@ def overview(db: Session, tenant_id: str, space: str, days: int = 30) -> dict:
                        sorted(channels.items(), key=lambda kv: -kv[1][0])],
         "by_type": [{"type": k, "count": v[0], "value": round(v[1], 2)} for k, v in
                     sorted(types.items(), key=lambda kv: -kv[1][0])],
-        "by_city": [{"city": k, "count": v} for k, v in cities.most_common(12)],
+        "by_city": [{"city": k, "count": v, "interventions": city_iv[k], "rate": round(city_iv[k] / v, 4) if v else 0}
+                    for k, v in cities.most_common(16)],
         "customer_risk": dict(Counter(c.risk_category for c in customers)),
         "customer_types": dict(Counter(c.customer_type for c in customers)),
         "segments": [{"segment": k, "customers": v} for k, v in seg.most_common(10)],

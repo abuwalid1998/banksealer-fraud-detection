@@ -23,6 +23,7 @@ Options:
     --targets 3.12,3.13           Python versions to download wheels for
     --out DIR                     output folder (default: dist)
     --index-url URL               private PyPI mirror (e.g. the bank's Artifactory / Nexus)
+    --with-ai                     also bundle the Anthropic SDK for the optional AI assistant (case summaries)
 Corporate proxies are honoured through the usual HTTPS_PROXY / HTTP_PROXY environment variables.
 """
 from __future__ import annotations
@@ -40,7 +41,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[2]
 HERE = Path(__file__).resolve().parent
 APP_ITEMS = ["banksealer", "mock_channel", "config", "verishield", "run_verishield.py", "requirements-verishield.txt",
-             "requirements-postgres.txt", "LICENSE", ".env.example"]
+             "requirements-postgres.txt", "requirements-ai.txt", "LICENSE", ".env.example"]
 DEPLOY_ITEMS = ["Install-VeriShield.ps1", "Manage-VeriShield.ps1", "Uninstall-VeriShield.ps1", "README.md",
                 "requirements-windows.txt", "INSTALL.cmd"]
 IGNORE = shutil.ignore_patterns("__pycache__", "*.pyc", ".pytest_cache", "*.db", "*.db-*", ".secret_key")
@@ -69,6 +70,17 @@ def download_wheels(target: str, dest: Path, index_url: str | None) -> None:
     subprocess.run(cmd, check=True)
 
 
+def download_ai_wheels(target: str, dest: Path, index_url: str | None) -> None:
+    """Anthropic SDK and its dependencies, constrained to the pinned versions of the main set."""
+    cmd = [sys.executable, "-m", "pip", "download", "--only-binary=:all:", "--platform", "win_amd64",
+           "--implementation", "cp", "--python-version", target, "-r", str(REPO / "requirements-ai.txt"),
+           "-c", str(HERE / "requirements-windows.txt"), "-d", str(dest), "--disable-pip-version-check"]
+    if index_url:
+        cmd += ["--index-url", index_url]
+    print(" ".join(cmd))
+    subprocess.run(cmd, check=True)
+
+
 def download_python(version: str, dest: Path) -> Path:
     dest.mkdir(parents=True, exist_ok=True)
     name = f"python-{version}-amd64.exe"
@@ -91,6 +103,7 @@ def main() -> int:
     ap.add_argument("--out", default=str(REPO / "dist"))
     ap.add_argument("--index-url")
     ap.add_argument("--no-zip", action="store_true", help="leave the folder unzipped")
+    ap.add_argument("--with-ai", action="store_true", help="bundle the Anthropic SDK (optional AI assistant)")
     args = ap.parse_args()
 
     stamp = dt.date.today().strftime("%Y%m%d")
@@ -116,6 +129,9 @@ def main() -> int:
         tag = "cp" + target.replace(".", "")
         step(f"Downloading Windows wheels for Python {target}")
         download_wheels(target, root / "wheels" / tag, args.index_url)
+        if args.with_ai:
+            download_ai_wheels(target, root / "wheels" / tag, args.index_url)
+            (root / "WITH_AI").write_text("bundle includes the optional AI assistant libraries\n", encoding="utf-8")
 
     if not args.no_python:
         step("Adding the Python installer")

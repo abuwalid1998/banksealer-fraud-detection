@@ -16,7 +16,7 @@ import re
 from datetime import datetime, timedelta
 from typing import Any, Optional
 
-from sqlalchemy import or_, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from .. import audit
@@ -275,6 +275,9 @@ def create_case(db: Session, p: Principal, data: dict) -> Case:
         assign(db, p, case, data["assignee_id"], data.get("assignment_note", ""), commit=False)
     elif data.get("priority"):
         _move(db, case, p, "TRIAGED", "TRIAGED", f"priority {priority}")
+    if not data.get("assignee_id") and data.get("auto_assign"):
+        db.flush()
+        auto_assign(db, case, force=True)
     audit.record(db, p.tenant_id, "case.create", actor=p, resource_type="case", resource_id=case.id,
                  after={"type": case_type, "priority": priority, "alerts": alert_ids, "tx": tx_refs,
                         "customers": customer_refs}, commit=False)
@@ -468,6 +471,7 @@ def dispose(db: Session, p: Principal, case: Case, value: str, rationale: str, c
     case.disposition = {"value": value, "label": DISPOSITIONS[value], "rationale": rationale.strip(),
                         "decided_by": p.display, "decided_by_id": p.user_id,
                         "decided_at": utcnow().isoformat(timespec="seconds") + "Z", "execution": execution}
+    apply_outcome_labels(db, case, value, p.display)
     if value == "CONFIRM_FRAUD":
         case.classification = "CONFIRMED_FRAUD"
     elif value == "ESCALATE_STR_ASSESSMENT":
@@ -523,3 +527,143 @@ __all__ = ["create_case", "assign", "recommend", "dispose", "close", "reopen", "
            "update_checklist", "begin_review", "start", "close_alert", "triage_alert", "create_manual_alert",
            "serialize", "get_case", "case_query", "assigned_entity_refs", "CaseError", "RECOMMENDATIONS",
            "DISPOSITIONS", "ALERT_CLOSE_REASONS", "PRIORITIES", "STATUSES", "OPEN_STATUSES", "or_"]
+
+
+# --------------------------------------------------------------------------- 1.3 automation & fraud reports
+AUTOMATION_DEFAULTS = {"auto_assign": True, "strategy": "LEAST_LOADED", "auto_case_critical": True,
+                       "escalate_hours_before_due": 24, "escalate_bump_priority": True}
+
+
+def automation(tenant: Tenant) -> dict:
+    return {**AUTOMATION_DEFAULTS, **((tenant.settings or {}).get("case_automation") or {})}
+
+
+def system_principal(tenant_id: str, space: str, label: str = "VeriShield automation") -> Principal:
+    return Principal(tenant_id=tenant_id, kind="user", role="AML_MANAGER",
+                     perms={"cases.view_all", "cases.create", "cases.assign", "cases.dispose"}, space=space,
+                     display=label, user_id=None)
+
+
+def auto_assign(db: Session, case: Case, force: bool = False) -> Optional[User]:
+    """Assign an unassigned case to the AML Employee with the lightest open workload (or round robin)."""
+    tenant = db.get(Tenant, case.tenant_id)
+    conf = automation(tenant)
+    if case.assignee_id or not (conf["auto_assign"] or force):
+        return None
+    analysts = db.execute(select(User).where(User.tenant_id == case.tenant_id, User.role == "AML_EMPLOYEE",
+                                             User.status.in_(("ACTIVE", "INVITED"))).order_by(User.username)
+                          ).scalars().all()
+    if not analysts:
+        return None
+    if conf["strategy"] == "ROUND_ROBIN":
+        last = db.execute(select(Case.assignee_id).where(Case.tenant_id == case.tenant_id, Case.assignee_id.is_not(None))
+                          .order_by(Case.assigned_at.desc()).limit(1)).scalar()
+        ids = [a.id for a in analysts]
+        pick = analysts[(ids.index(last) + 1) % len(ids)] if last in ids else analysts[0]
+    else:
+        load = dict(db.execute(select(Case.assignee_id, func.count(Case.id)).where(
+            Case.tenant_id == case.tenant_id, Case.space == case.space, Case.status.in_(OPEN_STATUSES),
+            Case.assignee_id.is_not(None)).group_by(Case.assignee_id)).all())
+        pick = min(analysts, key=lambda a: (load.get(a.id, 0), a.username))
+    assign(db, system_principal(case.tenant_id, case.space), case, pick.id,
+           f"automatic assignment ({conf['strategy'].replace('_', ' ').lower()})", commit=False)
+    db.commit()
+    return pick
+
+
+def auto_case_for_alert(db: Session, alert: Alert) -> Optional[Case]:
+    tenant = db.get(Tenant, alert.tenant_id)
+    if not automation(tenant)["auto_case_critical"] or alert.severity != "CRITICAL" or alert.status != "OPEN":
+        return None
+    case = create_case(db, system_principal(alert.tenant_id, alert.space),
+                       {"alert_ids": [alert.id], "priority": "URGENT",
+                        "purpose": "Opened automatically for a CRITICAL alert."})
+    auto_assign(db, case)
+    return case
+
+
+def escalate_due(db: Session) -> int:
+    """Escalate open cases close to (or past) their due date: notify the Manager and raise the priority."""
+    from . import notify
+    n = 0
+    for tenant in db.execute(select(Tenant)).scalars():
+        conf = automation(tenant)
+        horizon = utcnow() + timedelta(hours=float(conf["escalate_hours_before_due"]))
+        rows = db.execute(select(Case).where(Case.tenant_id == tenant.id, Case.status.in_(OPEN_STATUSES),
+                                             Case.due_at.is_not(None), Case.due_at <= horizon,
+                                             Case.escalation.is_(None) | (Case.escalation != "SLA_ESCALATED")
+                                             )).scalars().all()
+        managers = db.execute(select(User).where(User.tenant_id == tenant.id, User.role == "AML_MANAGER",
+                                                 User.status == "ACTIVE")).scalars().all()
+        for case in rows:
+            if case.escalation in ("STR_ASSESSMENT",):
+                continue
+            before = case.priority
+            if conf["escalate_bump_priority"] and case.priority != "URGENT":
+                case.priority = PRIORITIES[min(PRIORITIES.index(case.priority) + 1, len(PRIORITIES) - 1)]
+            case.escalation = "SLA_ESCALATED"
+            _event(db, case, "automation", "ESCALATED",
+                   f"due {case.due_at:%d %b %H:%M} UTC - priority {before} -> {case.priority}")
+            for m in managers:
+                notify.enqueue(tenant, "case_assigned", email=m.email, phone=m.phone,
+                               subject=f"Case {case.id} escalated (SLA)",
+                               text=f"Case {case.id} '{case.title}' is due {case.due_at:%d %b %Y %H:%M} UTC.")
+            n += 1
+        db.commit()
+    return n
+
+
+def apply_outcome_labels(db: Session, case: Case, value: str, actor: str) -> None:
+    """Dispositions label the linked transactions - the training signal of the learning model."""
+    from .signals import label_transactions, watch_transaction
+    refs = [l.entity_ref for l in db.execute(select(CaseEntityLink).where(
+        CaseEntityLink.case_id == case.id, CaseEntityLink.entity_type == "TRANSACTION")).scalars()]
+    if value in ("CONFIRM_FRAUD", "REJECT_TRANSACTION"):
+        label_transactions(db, case.tenant_id, case.space, refs, 1, "disposition")
+        for tx in db.execute(select(Transaction).where(Transaction.tenant_id == case.tenant_id,
+                                                       Transaction.space == case.space,
+                                                       Transaction.tx_ref.in_(refs))).scalars():
+            if value == "CONFIRM_FRAUD" and tx.is_outflow_row:
+                watch_transaction(db, tx, f"Confirmed fraud in case {case.id}", actor, "CASE", case.id)
+    elif value in ("CLOSE_FALSE_POSITIVE", "CLOSE_NO_CONCERN", "RELEASE_TRANSACTION"):
+        label_transactions(db, case.tenant_id, case.space, refs, 0, "disposition")
+
+
+def report_fraud(db: Session, p: Principal, data: dict) -> dict:
+    """Customer-reported fraud (branch / call centre): case, labels, watch list and optional reject."""
+    from .decision import request_bank_action
+    from .signals import label_transactions, watch_transaction
+    customer_ref = str(data.get("customer_ref") or "").strip()
+    tx_refs = [t for t in (data.get("tx_refs") or []) if t]
+    if not customer_ref and not tx_refs:
+        raise CaseError(422, "a customer or at least one transaction is required")
+    description = str(data.get("description") or "").strip()
+    if len(description) < 10:
+        raise CaseError(422, "describe what the customer reported (at least 10 characters)")
+    txs = db.execute(select(Transaction).where(Transaction.tenant_id == p.tenant_id, Transaction.space == p.space,
+                                               Transaction.tx_ref.in_(tx_refs))).scalars().all() if tx_refs else []
+    if len(txs) != len(set(tx_refs)):
+        raise CaseError(404, "one or more transactions were not found")
+    customer_ref = customer_ref or txs[0].customer_ref
+    channel = str(data.get("reported_via") or "CALL_CENTRE").upper()
+    sp = system_principal(p.tenant_id, p.space, f"Fraud report recorded by {p.display}")
+    case = create_case(db, sp, {"tx_refs": tx_refs, "customer_refs": [customer_ref], "priority": "URGENT",
+                               "title": f"Customer-reported fraud - {customer_ref}",
+                               "purpose": f"Reported via {channel.replace('_', ' ').lower()}: {description}",
+                               "classification": "CUSTOMER_REPORTED_FRAUD"})
+    label_transactions(db, p.tenant_id, p.space, tx_refs, 1, "customer_report")
+    watched, actions = [], []
+    for tx in txs:
+        if data.get("watchlist", True) and tx.is_outflow_row:
+            watched += [w.value for w in watch_transaction(db, tx, f"Customer reported fraud (case {case.id})",
+                                                           p.display, "CUSTOMER_REPORT", case.id)]
+        if data.get("reject_pending", True) and tx.execution_state in ("PENDING", "HELD"):
+            actions.append(request_bank_action(db, p.tenant_id, p.space, tx.tx_ref, "REJECT", p,
+                                               "Customer reported the payment as fraud"))
+    auto_assign(db, case, force=True)
+    db.add(CaseNote(case_id=case.id, author_id=p.user_id or "system", author_name=p.display, kind="FINDING",
+                    body=f"Customer report ({channel}): {description}"))
+    audit.record(db, p.tenant_id, "fraud.customer_report", actor=p, resource_type="case", resource_id=case.id,
+                 space=p.space, after={"tx": tx_refs, "watchlist": watched, "channel": channel})
+    db.commit()
+    return {"case_id": case.id, "watchlisted": watched, "bank_actions": actions}

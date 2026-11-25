@@ -30,7 +30,9 @@ export async function render(el) {
   </div>
   <div style="margin-top:16px">${card("Recent agent activity", table([{ label: "Time", render: (r) => fmtRel(r.created_at) }, { label: "Agent", render: (r) => esc(r.actor_name) },
     { label: "Action", render: (r) => `<span class="code">${esc(r.action)}</span>` }, { label: "Tool", render: (r) => esc(r.resource_id || "") },
-    { label: "Outcome", render: (r) => chip(r.outcome, r.outcome === "SUCCESS" ? "ok" : "crit") }], d.recent_calls, { empty: "No agent activity yet." }), { flush: true })}</div>`;
+    { label: "Outcome", render: (r) => chip(r.outcome, r.outcome === "SUCCESS" ? "ok" : "crit") }], d.recent_calls, { empty: "No agent activity yet." }), { flush: true })}</div>
+  <div style="margin-top:16px" id="aibox"></div>`;
+  aiAssistant(el.querySelector("#aibox")).catch(errToast);
   el.querySelectorAll("[data-copy]").forEach((b) => (b.onclick = () => navigator.clipboard && navigator.clipboard.writeText(b.dataset.copy).then(() => toast("Copied"))));
   const f = el.querySelector("#mf");
   f.addEventListener("submit", (e) => {
@@ -50,12 +52,37 @@ export async function render(el) {
       <p class="tiny muted" style="margin-top:8px">Scopes: mcp:use, read:operations, read:aml, read:executive, policies:simulate, reports:generate. Transaction and customer data are returned masked.</p>`,
       actions: [{ label: "Cancel" }, { label: "Create", cls: "primary", onClick: (m) => api.post("/mcp/keys", { name: m.querySelector("[name=name]").value, space: m.querySelector("[name=space]").value }) }] });
     if (!r) return;
-    await modal({ title: "MCP access key", body: `<div class="notice warn" style="margin-bottom:12px">${esc(r.note)}</div><input class="input mono" readonly value="${esc(r.api_key)}" onclick="this.select()">`,
-      actions: [{ label: "I have stored it securely", cls: "primary", value: true }] });
+    await modal({ title: "MCP access key", body: `<div class="notice warn" style="margin-bottom:12px">${esc(r.note)}</div><input class="input mono" readonly value="${esc(r.api_key)}" data-selectall>`,
+      actions: [{ label: "I have stored it securely", cls: "primary", value: true }],
+      onOpen: (m) => m.querySelectorAll("[data-selectall]").forEach((i) => (i.onclick = () => i.select())) });
     render(el);
   };
   el.querySelectorAll("[data-rev]").forEach((b) => (b.onclick = async () => {
     if (!(await confirmDialog("Revoke access key", "Agents using this key are disconnected immediately.", "Revoke", "danger"))) return;
     try { await api.del(`/api-clients/${b.dataset.rev}`); toast("Revoked"); render(el); } catch (e) { errToast(e); }
   }));
+}
+
+// AI assistant used inside VeriShield (case summaries, STR narratives).
+async function aiAssistant(box) {
+  const d = await api.get("/ai/settings");
+  const c = d.config;
+  box.innerHTML = `<form id="af">${card("AI assistant for case summaries and STR narratives", `
+    <div class="row" style="margin-bottom:12px">${toggle("enabled", c.enabled, "AI assistant ON")}<span class="spacer"></span>
+      ${c.sdk_installed ? chip("ANTHROPIC SDK READY", "ok") : chip("anthropic PACKAGE NOT INSTALLED", "crit")} ${c.api_key_configured ? chip("API KEY IN VAULT", "ok") : chip("NO API KEY", "neutral")}</div>
+    <div class="form-grid">
+      <label class="f">Model<select class="input" name="model">${options(d.models.map((m) => [m, m]), c.model)}</select></label>
+      <label class="f">Effort<select class="input" name="effort">${options(["low", "medium", "high"], c.effort)}</select></label>
+      <label class="f">API endpoint (optional)<span class="help">empty = Anthropic API; or the bank's approved gateway</span><input class="input mono" name="base_url" value="${esc(c.base_url)}"></label>
+      <label class="f">API key<span class="help">stored encrypted; leave empty to keep</span><input class="input" type="password" name="api_key" autocomplete="new-password"></label></div>
+    <div class="row" style="margin-top:12px;gap:22px">${toggle("mask_identifiers", c.mask_identifiers, "Mask customer names and account numbers before sending")}${toggle("fallbacks", c.fallbacks, "Server-side fallback model if a request is declined")}</div>
+    <p class="small muted" style="margin-top:10px">When OFF (default) – or when the server cannot reach the model – VeriShield writes the narrative from the case facts itself. With AI ON, a case fact sheet is sent to Claude; analysts always review and edit the draft before it is saved. Check the bank's data-protection approval before switching it on.</p>`,
+    { actions: '<button class="btn sm primary">Save</button>' })}</form>`;
+  const f = box.querySelector("#af");
+  f.onsubmit = (e) => { e.preventDefault(); busy(f.querySelector("button.primary"), async () => {
+    try {
+      const v = {}; f.querySelectorAll("[name]").forEach((i) => (v[i.name] = i.type === "checkbox" ? i.checked : i.value));
+      if (!v.api_key) delete v.api_key;
+      await api.put("/ai/settings", v); toast("AI assistant settings saved"); aiAssistant(box);
+    } catch (err) { errToast(err); } }); };
 }
