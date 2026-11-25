@@ -1,0 +1,5 @@
+# TrustGraph knowledge assistant (trustgraph_app). Install:  pip install -r requirements-trustgraph.txt
+fastapi>=0.110
+uvicorn[standard]>=0.27
+python-multipart>=0.0.9
+websockets>=13.0

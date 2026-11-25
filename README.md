@@ -8,6 +8,7 @@ This repository contains three products built on the **BankSealer** behavioural 
 | **VeriShield** (main product, v1.4) | Browser-based real-time fraud decisioning, AML case management, regulatory reporting (STR / CTR), customer risk assessment, screening, network and cheque fraud detection, core-banking API registry, high availability, SIEM and AI-agent (MCP) integration | [`docs/verishield/README.md`](docs/verishield/README.md) |
 | **BankSealer Enterprise** | Docker stack: React console, REST API, worker and PostgreSQL configuration database | [`docs/ENTERPRISE.md`](docs/ENTERPRISE.md) |
 | **BankSealer desktop** | Desktop application and the reference implementation of the engine | below |
+| **TrustGraph Knowledge Assistant** | Ask questions over the VeriShield documents in a TrustGraph knowledge graph (Graph RAG, Document RAG, agent) | [`trustgraph_app/README.md`](trustgraph_app/README.md) |
 
 ## VeriShield
 
