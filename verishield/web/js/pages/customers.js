@@ -249,7 +249,7 @@ function bindCra(el, box, ref, cache) {
 
 function cardsCard(d) {
   return card("Payment cards", table([
-    { label: "Card", render: (c) => `${icon("card")} <span class="mono small">${esc(c.card_ref)}</span>${c.last_used ? `<div class="tiny muted">last ${esc(label(c.last_type))} ${fmtRel(c.last_used)}</div>` : ""}` },
+    { label: "Card", render: (c) => `<span class="mono small">${esc(c.card_ref)}</span>${c.last_used ? `<div class="tiny muted">last ${esc(label(c.last_type))} ${fmtRel(c.last_used)}</div>` : ""}` },
     { label: "Status", render: (c) => chip(c.status, c.status === "FROZEN" ? "crit" : "ok") + (c.control && c.status === "FROZEN" ? `<div class="tiny muted">${esc(label(c.control.source))} · ${esc(c.control.reason)}<br>${esc(c.control.command_status)}</div>` : "") },
     { label: "", render: (c) => d.can_manage ? (c.status === "FROZEN" ? `<button class="btn sm" data-card="unfreeze" data-c="${esc(c.card_ref)}">Unfreeze</button>` : `<button class="btn sm danger" data-card="freeze" data-c="${esc(c.card_ref)}">Freeze</button>`) : "" },
   ], d.cards, { empty: "No card activity." }), { flush: true, sub: "Frozen cards are blocked in the card system (command through the bank adapter) and declined by VeriShield" });
