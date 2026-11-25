@@ -876,3 +876,93 @@ class CardControl(Base):
     frozen_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     unfrozen_by: Mapped[str] = mapped_column(String(120), default="")
     unfrozen_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+
+
+# =========================================================================== core banking API registry
+class CoreConnection(Base):
+    """How VeriShield reaches a core-banking system: address, security and transport settings."""
+    __tablename__ = "core_connections"
+    id: Mapped[str] = mapped_column(String(40), primary_key=True, default=lambda: new_id("CBC-"))
+    tenant_id: Mapped[str] = mapped_column(String(16), index=True)
+    name: Mapped[str] = mapped_column(String(120))
+    base_url: Mapped[str] = mapped_column(String(400))                 # https://core.bank.local/api  or mock://core
+    auth_type: Mapped[str] = mapped_column(String(16), default="NONE")  # NONE API_KEY BEARER BASIC OAUTH2_CC HMAC
+    auth: Mapped[dict] = mapped_column(JSON, default=dict)             # header, prefix, username, token_url, client_id...
+    secret_ref: Mapped[Optional[str]] = mapped_column(String(80), nullable=True)   # vault reference
+    verify_tls: Mapped[bool] = mapped_column(Boolean, default=True)
+    ca_file: Mapped[str] = mapped_column(String(400), default="")
+    client_cert_file: Mapped[str] = mapped_column(String(400), default="")       # mutual TLS
+    client_key_file: Mapped[str] = mapped_column(String(400), default="")
+    timeout_seconds: Mapped[float] = mapped_column(Float, default=10.0)
+    retries: Mapped[int] = mapped_column(Integer, default=1)
+    default_headers: Mapped[dict] = mapped_column(JSON, default=dict)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    last_test_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    last_test_ok: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)
+    last_test_detail: Mapped[str] = mapped_column(String(300), default="")
+    created_by: Mapped[str] = mapped_column(String(120), default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
+class CoreApi(Base):
+    """One core-banking operation (freeze a card, reject a transfer, reverse a transaction...) and its purpose."""
+    __tablename__ = "core_apis"
+    id: Mapped[str] = mapped_column(String(40), primary_key=True, default=lambda: new_id("CBA-"))
+    tenant_id: Mapped[str] = mapped_column(String(16), index=True)
+    name: Mapped[str] = mapped_column(String(120))
+    purpose: Mapped[str] = mapped_column(String(40), index=True)          # FREEZE_CARD, REJECT_PAYMENT ...
+    description: Mapped[str] = mapped_column(String(400), default="")
+    connection_id: Mapped[str] = mapped_column(String(40))
+    method: Mapped[str] = mapped_column(String(8), default="POST")
+    path: Mapped[str] = mapped_column(String(400), default="")            # template, e.g. /cards/{{card_ref}}/block
+    query: Mapped[dict] = mapped_column(JSON, default=dict)               # name -> template
+    headers: Mapped[dict] = mapped_column(JSON, default=dict)             # name -> template
+    body_type: Mapped[str] = mapped_column(String(8), default="JSON")     # JSON FORM XML NONE
+    body_template: Mapped[str] = mapped_column(Text, default="")
+    inputs: Mapped[list] = mapped_column(JSON, default=list)              # [{name, label, required, example}]
+    output_mapping: Mapped[dict] = mapped_column(JSON, default=dict)      # result field -> response path
+    success_codes: Mapped[list] = mapped_column(JSON, default=list)       # e.g. [200, 201, 202]
+    success_field: Mapped[str] = mapped_column(String(60), default="")    # mapped field that must match
+    success_values: Mapped[list] = mapped_column(JSON, default=list)
+    idempotency_header: Mapped[str] = mapped_column(String(60), default="Idempotency-Key")
+    timeout_seconds: Mapped[Optional[float]] = mapped_column(Float, nullable=True)   # override
+    retries: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)           # override
+    requires_approval: Mapped[bool] = mapped_column(Boolean, default=False)
+    allowed_roles: Mapped[list] = mapped_column(JSON, default=list)       # who may run it manually
+    live_enabled: Mapped[bool] = mapped_column(Boolean, default=False)    # used for the Live workspace
+    demo_enabled: Mapped[bool] = mapped_column(Boolean, default=True)     # used for the Demo workspace
+    priority: Mapped[int] = mapped_column(Integer, default=100)           # lowest first when several serve a purpose
+    version: Mapped[int] = mapped_column(Integer, default=1)
+    created_by: Mapped[str] = mapped_column(String(120), default="")
+    updated_by: Mapped[str] = mapped_column(String(120), default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
+class CoreApiCall(Base):
+    """Every call (and every request waiting for approval) to a core-banking API."""
+    __tablename__ = "core_api_calls"
+    __table_args__ = (Index("ix_core_call_tenant_created", "tenant_id", "space", "created_at"),)
+    id: Mapped[str] = mapped_column(String(40), primary_key=True, default=lambda: new_id("CBX-"))
+    tenant_id: Mapped[str] = mapped_column(String(16))
+    space: Mapped[str] = mapped_column(String(8), default="LIVE")
+    api_id: Mapped[str] = mapped_column(String(40), default="", index=True)
+    purpose: Mapped[str] = mapped_column(String(40), index=True)
+    trigger: Mapped[str] = mapped_column(String(10), default="AUTO")      # AUTO MANUAL TEST DRYRUN
+    status: Mapped[str] = mapped_column(String(18), default="PENDING")    # SUCCESS FAILED SIMULATED PENDING_APPROVAL REJECTED NO_API
+    inputs: Mapped[dict] = mapped_column(JSON, default=dict)
+    target_ref: Mapped[str] = mapped_column(String(80), default="", index=True)   # tx / card / account / customer
+    request: Mapped[dict] = mapped_column(JSON, default=dict)             # method, url, headers, body (masked)
+    http_status: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    response_excerpt: Mapped[str] = mapped_column(Text, default="")
+    result: Mapped[dict] = mapped_column(JSON, default=dict)              # mapped outputs
+    error: Mapped[str] = mapped_column(String(500), default="")
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    duration_ms: Mapped[float] = mapped_column(Float, default=0.0)
+    idempotency_key: Mapped[str] = mapped_column(String(80), default="")
+    reason: Mapped[str] = mapped_column(String(400), default="")
+    requested_by: Mapped[str] = mapped_column(String(120), default="")
+    approved_by: Mapped[str] = mapped_column(String(120), default="")
+    decided_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)

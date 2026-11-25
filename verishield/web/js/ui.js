@@ -84,6 +84,7 @@ const P = {
   lock: "M7 11V8a5 5 0 0 1 10 0v3M5 11h14v10H5z",
   shield: "M12 3l8 3v6c0 4.5-3.4 8.3-8 9-4.6-.7-8-4.5-8-9V6z",
   server: "M4 4h16v6H4zM4 14h16v6H4zM8 7h.01M8 17h.01",
+  core: "M3 10l9-6 9 6M5 10v9M19 10v9M9 10v9M15 10v9M3 21h18",
   sparkle: "M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8zM19 16l.8 2.2L22 19l-2.2.8L19 22l-.8-2.2L16 19l2.2-.8z",
 };
 export function icon(name, extra = "") {

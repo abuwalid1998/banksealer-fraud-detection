@@ -22,7 +22,7 @@ from mock_channel.generator import PS_CITIES, PS_COMPANIES, PS_FIRST, PS_LAST, T
 
 from .. import audit
 from ..deps import Principal
-from ..models import (Alert, ApiClient, CardControl, Case, CaseEntityLink, CaseEvent, CaseNote, ChequeReturn,
+from ..models import (Alert, ApiClient, CardControl, CoreApiCall, Case, CaseEntityLink, CaseEvent, CaseNote, ChequeReturn,
                       Connector, CtrReport, Customer, NetworkScore, RiskAssessment,
                       CustomerConfirmation, CustomerReview, CustomerSegment, DeadLetterEvent, Decision,
                       EvidenceReference, ExecutionStatusEvent, LoginEvent, ModelVersion, ReportJob, ReportSchedule,
@@ -626,7 +626,7 @@ def reset(db: Session, tenant_id: str, actor, reseed: bool = True) -> dict:
     for model in (Case, Alert, ExecutionStatusEvent, Decision, Transaction, Customer, CustomerSegment, ModelVersion,
                   DeadLetterEvent, ReportJob, Connector, ApiClient, ScreeningMatch, WatchlistEntry,
                   CustomerConfirmation, StrReport, LoginEvent, CustomerReview, ReportSchedule, CtrReport,
-                  RiskAssessment, ChequeReturn, NetworkScore, CardControl):
+                  RiskAssessment, ChequeReturn, NetworkScore, CardControl, CoreApiCall):
         res = db.execute(delete(model).where(model.tenant_id == tenant_id, model.space == "DEMO"))
         counts[model.__tablename__] = res.rowcount
     db.commit()

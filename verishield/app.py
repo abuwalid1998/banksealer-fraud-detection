@@ -14,7 +14,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from . import __version__
-from .api import admin, auth, cases, core, governance, intel, platform, system
+from .api import admin, auth, cases, core, corebank, governance, intel, platform, system
 from .models import Tenant
 from .services.metrics import metrics
 from .settings import settings
@@ -174,7 +174,7 @@ def create_app() -> FastAPI:
         return JSONResponse({"detail": {"code": "INTERNAL_ERROR", "message": "Unexpected error - see server log",
                                         "type": type(exc).__name__}}, 500)
 
-    for module in (platform, intel, auth, admin, core, cases, governance, system):
+    for module in (corebank, platform, intel, auth, admin, core, cases, governance, system):
         app.include_router(module.router)
     app.include_router(admin.health_router)
     app.include_router(system.mcp_router)

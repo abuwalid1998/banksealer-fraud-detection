@@ -962,3 +962,126 @@ def test_push_confirmation_card_freeze_and_siem_forwarding(client):
     assert b"act=siem.update" in got and b"suser=" in got
     sock.close()
     client.put("/api/v1/siem", headers=a, json={"enabled": False})
+
+
+# =========================================================================== core banking API registry
+def _mock_core_server():
+    """Local HTTP server standing in for the bank's core system; records every request."""
+    import json as _json
+    import threading
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+    seen = []
+    state = {"fail_once": 0}
+
+    class H(BaseHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
+
+        def _do(self):
+            n = int(self.headers.get("Content-Length") or 0)
+            body = self.rfile.read(n) if n else b""
+            seen.append({"method": self.command, "path": self.path, "headers": dict(self.headers), "body": body})
+            if "/flaky/" in self.path and state["fail_once"] > 0:
+                state["fail_once"] -= 1
+                self.send_response(503); self.end_headers(); return
+            if b'"amount": 0' in body or b'"amount":0' in body:
+                out, code = {"result": {"code": "REJECTED", "ref": None}, "error": "amount must be positive"}, 422
+            else:
+                out, code = {"result": {"code": "DONE", "ref": f"CBS-{len(seen):04d}"}, "info": "ok"}, 200
+            data = _json.dumps(out).encode()
+            self.send_response(code)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+
+        do_POST = do_PUT = do_GET = do_DELETE = _do
+
+    srv = HTTPServer(("127.0.0.1", 0), H)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    return srv, seen, state
+
+
+def test_core_banking_registry_configuration_and_calls(client):
+    import hashlib
+    import hmac as _hmac
+    import json as _json
+    srv, seen, state = _mock_core_server()
+    a = _demo_on(client)
+    m = login(client, "2000")
+    ov = client.get("/api/v1/core/overview", headers=a).json()
+    assert "FREEZE_CARD" in ov["purposes"] and ov["apis"], "examples seeded on a mock connection"
+    assert client.post("/api/v1/core/connections", headers=m, json={"name": "x", "base_url": "https://x"}).status_code == 403
+    conn = client.post("/api/v1/core/connections", headers=a, json={
+        "name": "Core T24 (test)", "base_url": f"http://127.0.0.1:{srv.server_port}/core", "auth_type": "HMAC",
+        "auth": {"header": "X-Signature", "timestamp_header": "X-Timestamp", "prefix": ""}, "retries": 2,
+        "default_headers": {"X-Channel": "VERISHIELD"}}).json()
+    client.post(f"/api/v1/core/connections/{conn['id']}/secret", headers=a, json={"value": "hmac-shared-secret"})
+    t = client.post(f"/api/v1/core/connections/{conn['id']}/test", headers=a).json()
+    assert t["ok"] and "reachable" in t["detail"]
+    assert seen[-1]["headers"].get("X-Signature"), "the connection test is signed too"
+    seen.clear()
+    bad = client.post("/api/v1/core/apis", headers=a, json={"name": "bad", "purpose": "REVERSE_TRANSACTION",
+                                                             "connection_id": conn["id"], "body_template": "{not json"})
+    assert bad.status_code == 422
+    api = client.post("/api/v1/core/apis", headers=a, json={
+        "name": "T24 reversal", "purpose": "REVERSE_TRANSACTION", "connection_id": conn["id"], "method": "POST",
+        "path": "/flaky/txn/{{transaction_id}}/reverse", "query": {"branch": "{{branch|default:HQ}}"},
+        "headers": {"X-Requested-By": "{{requested_by}}"},
+        "body_template": '{"txn": "{{transaction_id}}", "amount": "{{amount}}", "cents": "{{amount|cents}}", '
+                         '"account": "{{account|default:PS92PALS000000000400123456789}}", "why": "{{reason}}"}',
+        "output_mapping": {"reference": "result.ref", "status": "result.code", "message": "error"},
+        "success_codes": [200], "success_field": "status", "success_values": ["DONE"],
+        "requires_approval": True, "allowed_roles": ["AML_MANAGER"], "live_enabled": False, "demo_enabled": True,
+        "priority": 1}).json()
+    assert api["purpose"] == "REVERSE_TRANSACTION" and api["inputs"], "inputs copied from the purpose"
+    dry = client.post(f"/api/v1/core/apis/{api['id']}/test", headers=a, json={
+        "inputs": {"transaction_id": "T-X-1", "amount": 99.5, "currency": "ILS", "customer_id": "C00020",
+                   "reason": "test"}}).json()
+    assert dry["status"] == "DRY_RUN" and dry["request"]["url"].endswith("/flaky/txn/T-X-1/reverse?branch=HQ")
+    assert dry["request"]["body"]["cents"] == 9950 and dry["request"]["body"]["amount"] == 99.5
+    assert "•" in dry["request"]["body"]["account"], "account numbers masked in the log"
+    assert not seen, "dry run sends nothing"
+    # a manual reversal needs a second person; the call goes out with HMAC, idempotency key and retries
+    r = client.post("/api/v1/decisions/evaluate", headers=m, json={
+        "transaction_id": "T-REV-1", "customer_id": "C00020", "transaction_type": "bank_transfer", "amount": 320,
+        "beneficiary_reference": "PS92PALS000000000400555000111"})
+    assert r.status_code == 201
+    assert client.post("/api/v1/core/operations", headers=a, json={
+        "purpose": "REVERSE_TRANSACTION", "inputs": {"transaction_id": "T-REV-1"}, "reason": "x"}).status_code == 403
+    req = client.post("/api/v1/core/operations", headers=m, json={
+        "purpose": "REVERSE_TRANSACTION", "inputs": {"transaction_id": "T-REV-1"},
+        "reason": "Customer confirmed fraud, recall approved"}).json()
+    assert req["status"] == "PENDING_APPROVAL" and req["inputs"]["amount"] == 320.0
+    same = client.post(f"/api/v1/core/calls/{req['id']}/approve", headers=m)
+    assert same.status_code == 403 and same.json()["detail"]["code"] == "FOUR_EYES"
+    state["fail_once"] = 1
+    done = client.post(f"/api/v1/core/calls/{req['id']}/approve", headers=login(client, "4000")).json()
+    assert done["status"] == "SUCCESS" and done["attempts"] == 2, done
+    assert done["result"]["reference"].startswith("CBS-")
+    sent = seen[-1]
+    body = sent["body"]
+    sig = _hmac.new(b"hmac-shared-secret", sent["headers"]["X-Timestamp"].encode() + b"." + body, hashlib.sha256).hexdigest()
+    assert sent["headers"]["X-Signature"] == sig and sent["headers"]["X-Channel"] == "VERISHIELD"
+    assert sent["headers"]["Idempotency-Key"] == f"VS-{req['id']}" == seen[-2]["headers"]["Idempotency-Key"]
+    assert _json.loads(body)["amount"] == 320.0
+    tx = client.get("/api/v1/transactions/T-REV-1", headers=m).json()
+    assert "REVERSED" in _json.dumps(tx)
+    # a business error from the core is a failed call with the core's message
+    fail = client.post(f"/api/v1/core/apis/{api['id']}/test", headers=a, json={"send": True, "inputs": {
+        "transaction_id": "T-X-2", "amount": 0, "currency": "ILS", "customer_id": "C00020", "reason": "t"}}).json()
+    assert fail["status"] == "FAILED" and fail["http_status"] == 422 and "positive" in fail["error"]
+    # card freeze goes through the registry (example operation on the mock connection)
+    fz = client.post("/api/v1/cards/CARD-CORE-1/freeze", headers=m, json={"customer_id": "C00020",
+                                                                         "reason": "fraud suspicion on card"}).json()
+    assert fz["command_status"] == "ACKED" and "accepted by the core" in fz["command_detail"]
+    calls = client.get("/api/v1/core/calls?purpose=FREEZE_CARD", headers=a).json()["calls"]
+    assert calls and calls[0]["status"] == "SUCCESS" and calls[0]["request"]["url"].startswith("mock://core/cards/")
+    # custom purpose
+    pp = client.put("/api/v1/core/purposes/NOTIFY_BRANCH", headers=a, json={
+        "label": "Notify the home branch", "category": "OTHER", "inputs": [{"name": "customer_id", "label": "Customer"}]})
+    assert pp.status_code == 200 and not pp.json()["builtin"]
+    assert client.put("/api/v1/core/purposes/NOTIFY_BRANCH", headers=m, json={"label": "x"}).status_code == 403
+    ops = client.get("/api/v1/core/operations", headers=m).json()["operations"]
+    assert any(o["purpose"] == "REVERSE_TRANSACTION" and o["requires_approval"] for o in ops)
+    srv.shutdown()

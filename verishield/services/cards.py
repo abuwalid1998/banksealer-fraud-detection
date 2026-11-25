@@ -36,6 +36,16 @@ def active_freeze(db: Session, tenant_id: str, space: str, card_ref: str) -> Opt
 
 
 def _command(db: Session, tenant_id: str, space: str, ctl: CardControl, command: str) -> None:
+    from . import core_api
+    if core_api.available(db, tenant_id, space, command):        # configured core-banking API for this purpose
+        call = core_api.execute(db, tenant_id, space, command, {"card_ref": ctl.card_ref, "customer_id": ctl.customer_ref,
+                                                                  "transaction_id": ctl.tx_ref or None},
+                                ctl.unfrozen_by or ctl.frozen_by or "VeriShield", "AUTO", ctl.reason, commit=False)
+        ctl.command_status = "ACKED" if call.status == "SUCCESS" else "FAILED"
+        ref = (call.result or {}).get("reference")
+        ctl.command_detail = (f"{command} accepted by the core (ref {ref})" if call.status == "SUCCESS"
+                              else f"{command} failed: {call.error}")[:300]
+        return
     if space == "DEMO":
         ctl.command_status, ctl.command_detail = "SIMULATED", f"Demo Mode: {command} simulated"
         return

@@ -23,6 +23,7 @@ const PAGES = {
   str: () => import("./pages/str.js"),
   networks: () => import("./pages/networks.js"),
   cheques: () => import("./pages/cheques.js"),
+  core: () => import("./pages/core.js"),
   account: () => import("./pages/account.js"),
 };
 const root = document.getElementById("root");
@@ -254,7 +255,7 @@ function renderShell() {
   const m = S.me;
   const initials = (m.user.first_name[0] || "") + (m.user.last_name[0] || "") || m.user.username.slice(0, 2);
   const groups = [["Monitor", ["overview", "transactions", "customers", "alerts"]], ["Investigate", ["cases", "screening", "networks", "cheques", "reviews", "str", "decision", "reports"]],
-    ["Intelligence", ["models", "clusters", "policies"]], ["Administration", ["integrations", "operations", "notifications", "agents", "settings"]]];
+    ["Intelligence", ["models", "clusters", "policies"]], ["Administration", ["integrations", "core", "operations", "notifications", "agents", "settings"]]];
   const navHtml = groups.map(([g, ids]) => {
     const items = m.navigation.filter((n) => ids.includes(n.id));
     return items.length ? `<div class="grp">${g}</div>` + items.map((n) => `<a href="#/${n.id}" data-nav="${n.id}">${icon(n.id)}<span>${esc(n.label)}</span></a>`).join("") : "";

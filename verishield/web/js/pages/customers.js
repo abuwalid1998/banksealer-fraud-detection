@@ -66,6 +66,7 @@ async function drawProfile(el, ref, setTitle, silent = false) {
   if (can("reports.aml") || can("reports.executive") || can("reports.assigned")) actions.push('<button class="btn" data-act="pdf">Profile report</button>');
   actions.unshift(`<button class="btn" data-act="timeline">Timeline</button>${can("customers.view_full") || can("customers.view_assigned") ? `<button class="btn" data-act="network">${icon("network")} Network</button>` : ""}`);
   if (can("reviews.manage")) actions.push('<button class="btn" data-act="review">Start review</button>');
+  if (can("core.execute")) actions.push('<button class="btn" data-act="core">Core banking action</button>');
   if (can("fraud.report")) actions.push('<button class="btn danger" data-act="fraud">Customer reports fraud</button>');
   el.innerHTML = `<div class="row" style="margin-bottom:14px"><a href="#/customers" class="btn sm ghost">← Customers</a><span class="spacer"></span>${actions.join("")}</div>
     ${d.limited_history ? `<div class="notice warn" style="margin-bottom:14px"><b>Limited history.</b> ${esc(d.monitoring_treatment)}</div>` : ""}
@@ -118,6 +119,7 @@ async function drawProfile(el, ref, setTitle, silent = false) {
   const act = (n) => el.querySelector(`[data-act=${n}]`);
   if (act("timeline")) act("timeline").onclick = () => showTimeline(ref);
   if (act("network")) act("network").onclick = () => showNetwork(ref);
+  if (act("core")) act("core").onclick = async () => { const { openCoreOperation } = await import("./core.js"); openCoreOperation({ purpose: "BLOCK_ACCOUNT", inputs: { customer_id: ref } }); };
   if (act("review")) act("review").onclick = (e) => busy(e.currentTarget, async () => {
     try { await api.post(`/customers/${encodeURIComponent(ref)}/review`, { days: 14 }); toast("Review opened – due in 14 days (Customer Reviews)"); } catch (err) { errToast(err); } });
   if (act("fraud")) act("fraud").onclick = () => reportFraud({ customer_ref: ref });

@@ -635,6 +635,26 @@ def request_bank_action(db: Session, tenant_id: str, space: str, tx_ref: str, ac
                 "message": f"Payment is {tx.execution_state}; no release/reject command is applicable."}
     command = "RELEASE" if action == "RELEASE" else "REJECT"
     actor_name = getattr(actor, "display", str(actor))
+    from . import core_api
+    purpose = "RELEASE_PAYMENT" if command == "RELEASE" else "REJECT_PAYMENT"
+    if core_api.available(db, tenant_id, space, purpose):     # configured core-banking API for this purpose
+        call = core_api.execute(db, tenant_id, space, purpose, {"transaction_id": tx.tx_ref,
+                                                                  "decision_id": tx.decision_id},
+                                actor_name, "AUTO", rationale, commit=False)
+        ref = (call.result or {}).get("reference") or ""
+        if call.status == "SUCCESS":
+            final = "AUTHORISED" if command == "RELEASE" else "DECLINED"
+            _execution(db, tx, final, "CORE_API", f"{command} by {actor_name} accepted by the core banking system",
+                       actor_name, ref)
+            db.commit()
+            return {"sent": True, "simulated": False, "state": final, "core_call": call.id, "reference": ref,
+                    "message": f"{command} executed by the core banking system (ref {ref or '-'})"}
+        _execution(db, tx, tx.execution_state, "CORE_API", f"{command} FAILED: {call.error}", actor_name)
+        open_incident(db, tenant_id, f"core_api:{purpose}", f"Core banking API {purpose} failed", "SEV2",
+                      affected=purpose)
+        db.commit()
+        return {"sent": False, "simulated": False, "state": tx.execution_state, "core_call": call.id,
+                "message": f"The core banking system did not accept {command}: {call.error} - retry or act in the core"}
     if space == "DEMO":
         final = "AUTHORISED" if command == "RELEASE" else "DECLINED"
         _execution(db, tx, final, "DEMO_BANK_SIMULATOR",

@@ -75,6 +75,15 @@ default on outside production). With `VERISHIELD_ENV=production` only the bootst
 temporary password must be changed at first sign-in. **Forgot password?** on the sign-in page sends a one-time code by
 e-mail or SMS (in development, when no gateway is switched on, the code is shown on screen).
 
+### Core banking APIs (IT Admin)
+
+Every operation VeriShield performs on the bank's core systems - release / reject a held payment, freeze or unfreeze
+a card, reverse a transaction, block an account, place a hold, suspend digital banking, read a balance or a
+transaction status - is a configurable **operation** with a **purpose**, on a **connection** (URL, API key / bearer /
+basic / OAuth2 / HMAC, mutual TLS, retries, idempotency). Request, response mapping and success rule are templates;
+manual operations can require a second person's approval; every call is logged and audited. See
+[CORE_BANKING_APIS.md](CORE_BANKING_APIS.md).
+
 ### What's new in 1.4
 
 Before production

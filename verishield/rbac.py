@@ -70,6 +70,10 @@ ALL_PERMISSIONS = {
     "cheques.manage": "Record returned cheques",
     "cards.manage": "Freeze and unfreeze payment cards",
     "cards.view": "View card controls",
+    "core.configure": "Configure core-banking connections, operations (APIs) and purposes",
+    "core.view": "View the core-banking call log",
+    "core.execute": "Request core-banking operations (reverse, block, freeze...)",
+    "core.approve": "Approve core-banking operations that need a second person"
 }
 
 ROLE_PERMISSIONS: dict[str, set[str]] = {
@@ -78,6 +82,7 @@ ROLE_PERMISSIONS: dict[str, set[str]] = {
         "api_clients.manage", "demo.manage", "audit.view", "models.train", "models.activate", "models.view",
         "tx.view_masked", "customers.view_masked", "decisions.test", "policies.view", "reports.system",
         "notifications.manage", "mcp.manage", "screening.manage", "security.manage", "siem.manage",
+        "core.configure", "core.view",
     },
     "AML_MANAGER": {
         "system.summary", "models.view", "models.activate", "tx.view_full", "customers.view_full", "decisions.test",
@@ -86,7 +91,7 @@ ROLE_PERMISSIONS: dict[str, set[str]] = {
         "reports.assigned", "models.clusters", "screening.manage", "screening.view", "watchlist.manage",
         "fraud.report", "confirmations.answer", "reviews.manage", "str.prepare", "str.approve",
         "ctr.manage", "ctr.view", "cra.manage", "cra.approve", "cra.view", "network.view", "network.manage",
-        "cheques.view", "cheques.manage", "cards.manage", "cards.view",
+        "cheques.view", "cheques.manage", "cards.manage", "cards.view", "core.view", "core.execute", "core.approve",
     },
     "AML_EMPLOYEE": {
         "tx.view_assigned", "customers.view_assigned", "cases.view_assigned", "cases.note", "cases.recommend",
@@ -96,7 +101,7 @@ ROLE_PERMISSIONS: dict[str, set[str]] = {
         "system.summary", "connectors.view", "models.view", "tx.view_full", "customers.view_full",
         "alerts.view_all", "cases.view_all", "policies.view", "audit.view", "reports.aml", "reports.executive",
         "reports.assigned", "models.clusters", "screening.view", "str.approve", "ctr.view", "cra.view",
-        "cra.approve", "network.view", "cheques.view", "cards.view",
+        "cra.approve", "network.view", "cheques.view", "cards.view", "core.view", "core.execute", "core.approve",
     },
     # Read-only institution-wide view: everything needed to understand the system, never to change it.
     "CEO": {
@@ -138,6 +143,7 @@ NAVIGATION = [
     ("policies", "Policies & Thresholds", ("policies.view",)),
     ("operations", "Operations & Audit", ("system.view", "audit.view")),
     ("notifications", "E-mail, SMS & Push", ("notifications.manage",)),
+    ("core", "Core Banking APIs", ("core.configure", "core.execute", "core.approve", "core.view")),
     ("agents", "AI Agents (MCP)", ("mcp.manage",)),
     ("settings", "Users & Settings", ("users.manage", "tenant.manage")),
 ]
