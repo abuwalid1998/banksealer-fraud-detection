@@ -1,8 +1,8 @@
 // Users & settings (IT Admin): users, institution & security policy, branding, API clients, Demo Mode.
 import { api } from "../api.js";
 import { refreshMe } from "../app.js";
-import { S, busy, card, chip, confirmDialog, errToast, esc, fmtDate, fmtRel, icon, kv, label, loading, modal, options,
-  table, toast, toggle } from "../ui.js";
+import { S, busy, card, chip, confirmDialog, errToast, esc, fmtDate, fmtNum, fmtRel, icon, kpi, kv, label, loading, modal,
+  options, table, toast, toggle } from "../ui.js";
 
 const can = (p) => S.me.permissions.includes(p);
 
@@ -11,12 +11,13 @@ export async function render(el) {
   if (can("users.manage")) tabs.push(["users", "Users"]);
   if (can("tenant.manage")) tabs.push(["institution", "Institution & security"], ["directory", "Active Directory"], ["branding", "Report branding"]);
   if (can("api_clients.manage")) tabs.push(["api", "API clients"]);
+  if (can("security.manage")) tabs.push(["security", "Security posture"]);
   if (can("demo.manage")) tabs.push(["demo", "Demo Mode"]);
   let cur = tabs[0][0];
   const draw = () => {
     el.innerHTML = `<div class="tabs">${tabs.map(([k, l]) => `<button class="${k === cur ? "on" : ""}" data-t="${k}">${l}</button>`).join("")}</div><div id="tab">${loading()}</div>`;
     el.querySelectorAll("[data-t]").forEach((b) => (b.onclick = () => { cur = b.dataset.t; draw(); }));
-    ({ users, institution, directory, branding, api: apiClients, demo })[cur](el.querySelector("#tab")).catch(errToast);
+    ({ users, institution, directory, branding, api: apiClients, demo, security })[cur](el.querySelector("#tab")).catch(errToast);
   };
   draw();
 }
@@ -245,7 +246,8 @@ async function apiClients(box) {
     { label: "Workspace", render: (c) => chip(c.space, c.space === "DEMO" ? "warn" : "ok") }, { label: "Scopes", render: (c) => c.scopes.map((s) => `<span class="code">${esc(s)}</span>`).join(" ") },
     { label: "Rate limit", render: (c) => `${c.rate_limit_per_minute}/min` }, { label: "Status", render: (c) => c.active ? chip("ACTIVE", "ok") : chip("REVOKED", "crit") },
     { label: "Last used", render: (c) => c.last_used_at ? fmtRel(c.last_used_at) : "never" }, { label: "Created", render: (c) => fmtDate(c.created_at) },
-    { label: "", render: (c) => c.active ? `<button class="btn sm danger" data-rev="${esc(c.id)}">Revoke</button>` : "" },
+    { label: "Rotated", render: (c) => c.rotated_at ? fmtRel(c.rotated_at) + (c.previous_expires_at && new Date(c.previous_expires_at + (c.previous_expires_at.endsWith("Z") ? "" : "Z")) > new Date() ? `<div class="tiny muted">old key valid until ${fmtDate(c.previous_expires_at)}</div>` : "") : "never" },
+    { label: "", render: (c) => c.active ? `<div class="row nowrap"><button class="btn sm" data-rot="${esc(c.id)}">Rotate key</button><button class="btn sm danger" data-rev="${esc(c.id)}">Revoke</button></div>` : "" },
   ], d.clients, { empty: "No API clients yet." }), { flush: true, actions: '<button class="btn primary" id="add">Create API client</button>',
     sub: `New keys are bound to the current ${S.me.tenant.demo_mode ? "Demo" : "Live"} workspace` });
   box.querySelector("#add").onclick = async () => {
@@ -257,6 +259,12 @@ async function apiClients(box) {
         scopes: [...m.querySelectorAll("[data-scope]")].filter((c) => c.checked).map((c) => c.dataset.scope), rate_limit_per_minute: Number(m.querySelector("[name=rl]").value) }) }] });
     if (r) { await secretOnce(`API key for ${r.client.name}`, r.api_key, r.note); apiClients(box); }
   };
+  box.querySelectorAll("[data-rot]").forEach((b) => (b.onclick = async () => {
+    const r = await modal({ title: "Rotate API key", body: `<p class="small">A new key is issued. The current key keeps working during the grace period so the bank system can switch without downtime.</p>
+      <label class="f" style="margin-top:10px">Grace period<select class="input" name="h">${options([[24, "24 hours"], [72, "3 days"], [168, "7 days"], [0, "None - the old key stops now"]], 24)}</select></label>`,
+      actions: [{ label: "Cancel" }, { label: "Rotate", cls: "primary", onClick: (m) => api.post(`/api-clients/${b.dataset.rot}/rotate`, { grace_hours: Number(m.querySelector("[name=h]").value) }) }] });
+    if (r) { await secretOnce(`New API key for ${r.client.name}`, r.api_key, r.note); apiClients(box); }
+  }));
   box.querySelectorAll("[data-rev]").forEach((b) => (b.onclick = async () => {
     if (!(await confirmDialog("Revoke API client", "Calls with this key will be rejected immediately.", "Revoke", "danger"))) return;
     try { await api.del(`/api-clients/${b.dataset.rev}`); toast("Revoked"); apiClients(box); } catch (e) { errToast(e); }
@@ -281,4 +289,30 @@ async function demo(box) {
     try { const r = await api.post("/demo/reset", { confirm: box.querySelector("#confirm").value });
       toast(`Demo workspace regenerated: ${r.seed ? r.seed.customers : 0} customers, ${r.seed ? r.seed.history : 0} historical transactions. Start a channel to stream data.`); demo(box); } catch (err) { errToast(err); }
   });
+}
+
+// ------------------------------------------------------------------ security posture (IT Admin)
+async function security(box) {
+  const d = await api.get("/security/posture");
+  const tone = { PASS: "ok", WARN: "warn", FAIL: "crit", INFO: "neutral" };
+  const areas = [...new Set(d.checks.map((c) => c.area))];
+  box.innerHTML = `<div class="kpis">${kpi("Security score", `${d.score}<span class="small muted"> / 100</span>`, `grade ${d.grade}`, d.score >= 90 ? "" : d.score >= 75 ? "warn" : "crit")}
+      ${kpi("Failed checks", fmtNum(d.fail), "fix before go-live", d.fail ? "crit" : "")}${kpi("Warnings", fmtNum(d.warn), "", d.warn ? "warn" : "")}
+      ${kpi("Vault key", esc(d.vault.primary), d.vault.legacy_in_use ? "derived from the server secret" : `created ${fmtDate(d.vault.primary_created, { time: false })}`)}</div>
+    <div class="grid g2" style="margin-top:16px">${areas.map((a) => card(a, table([
+      { label: "Check", render: (c) => `<b class="small">${esc(c.title)}</b><div class="tiny muted">${esc(c.detail)}</div>` },
+      { label: "", render: (c) => chip(c.status, tone[c.status]) },
+      { label: "How to fix", render: (c) => (c.status === "PASS" ? "" : `<span class="tiny">${esc(c.fix || "")}</span>`) }], d.checks.filter((c) => c.area === a)), { flush: true })).join("")}</div>
+    <div style="margin-top:16px">${card("Secrets vault keys", `<p class="small">Gateway passwords, tokens and MFA seeds are encrypted with the vault key ring (<span class="mono">${esc(d.vault.file)}</span>).
+        Rotating adds a new key and re-encrypts every stored value; retire the old keys once backups taken with them are no longer needed.</p>
+      ${table([{ label: "Key", render: (k) => `<span class="mono">${esc(k.id)}</span>` }, { label: "Created", render: (k) => esc(k.created) }, { label: "", render: (k) => (k.primary ? chip("PRIMARY", "ok") : chip("DECRYPT ONLY", "neutral")) }], d.vault.keys, { empty: "No key ring yet - the key is derived from the server secret. Rotate to create one." })}`,
+      { actions: '<button class="btn sm" id="retire">Retire old keys</button><button class="btn sm primary" id="rotate">Rotate vault key</button>' })}</div>
+    <p class="tiny muted" style="margin-top:10px">Checked ${fmtRel(d.checked_at)}. Run <span class="code">python deploy/security/scan.py</span> before each release to add the code and dependency scan to this report.</p>`;
+  const rot = box.querySelector("#rotate");
+  rot.onclick = async () => {
+    if (!(await confirmDialog("Rotate the vault key", "A new key encrypts all stored secrets and MFA seeds. Keep a backup of the key ring file with your server backups.", "Rotate"))) return;
+    busy(rot, async () => { try { const r = await api.post("/security/vault/rotate"); toast(`Re-encrypted ${r.secrets} secret(s) and ${r.mfa_seeds} MFA seed(s) with ${r.primary}`); security(box); } catch (e) { errToast(e); } });
+  };
+  const ret = box.querySelector("#retire");
+  ret.onclick = () => busy(ret, async () => { try { const r = await api.post("/security/vault/retire"); toast(`${r.retired} old key(s) retired`); security(box); } catch (e) { errToast(e); } });
 }

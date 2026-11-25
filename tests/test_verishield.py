@@ -705,3 +705,260 @@ def test_active_directory_sign_in(client, monkeypatch):
     assert ok.status_code == 200 and "CHANGE_PASSWORD" not in ok.json()["restrictions"]
     client.post(f"/api/v1/users/{uid}/directory", headers=a, json={"auth_source": "LOCAL"})
     client.put("/api/v1/directory", headers=a, json={"enabled": False})
+
+
+# =========================================================================== 1.4
+def test_cluster_leader_election_checkpoints_and_metrics(client):
+    from datetime import timedelta
+    from verishield.db import SessionLocal
+    from verishield.models import ClusterLease, ModelCheckpoint, ModelVersion, utcnow
+    from verishield.services import cluster, engine_registry
+    from verishield.settings import settings
+    a = login(client, "1000")
+    st = client.get("/api/v1/system/cluster", headers=a).json()
+    assert st["leader"] == settings.node_id and st["nodes"]
+    assert client.get("/ready").json()["role"] == "LEADER"
+    with SessionLocal() as db:
+        assert cluster.try_acquire(db, settings.node_id)              # renew own lease
+        assert not cluster.try_acquire(db, "node-b:8000")             # lease held: the other node waits
+        db.execute(update(ClusterLease).values(expires_at=utcnow() - timedelta(seconds=1)))
+        db.commit()
+        assert cluster.try_acquire(db, "node-b:8000")                 # leader stopped renewing: takeover
+        assert cluster.current_leader(db)["node"] == "node-b:8000"
+        cluster.release(db, "node-b:8000")
+        assert cluster.try_acquire(db, settings.node_id)
+        # shared model checkpoint, verified before it is loaded
+        engine_registry.load_active_models(db)
+        assert cluster.save_checkpoints(db) >= 1
+        mv = db.execute(select(ModelVersion).where(ModelVersion.status == "ACTIVE", ModelVersion.kind == "FRAUD")).scalars().first()
+        cfg = engine_registry.workspace(mv.tenant_id, mv.space).engine.config
+        settings.cluster_mode = True
+        try:
+            assert cluster.load_checkpoint(db, mv, cfg) is not None
+            cp = db.get(ModelCheckpoint, mv.id)
+            cp.blob = cp.blob[:-10] + b"0123456789"                   # tampered
+            db.commit()
+            assert cluster.load_checkpoint(db, mv, cfg) is None
+        finally:
+            settings.cluster_mode = False
+    text = client.get("/metrics").text
+    assert "verishield_cluster_leader" in text and "verishield_alerts_open" in text
+
+
+def test_security_posture_headers_vault_and_api_key_rotation(client):
+    from verishield.db import SessionLocal
+    from verishield.models import SecretRecord
+    from verishield.security import decrypt_secret
+    a = login(client, "1000")
+    page = client.get("/")
+    assert "script-src 'self'" in page.headers["Content-Security-Policy"]
+    assert page.headers["X-Frame-Options"] == "DENY"
+    post = client.get("/api/v1/security/posture", headers=a).json()
+    assert 0 <= post["score"] <= 100 and {c["id"] for c in post["checks"]} >= {"tls", "audit", "vault", "mfa"}
+    client.post("/api/v1/notifications/secret", headers=a, json={"channel": "push", "value": "push-hmac-secret"})
+    rot = client.post("/api/v1/security/vault/rotate", headers=a).json()
+    assert rot["secrets"] >= 1 and rot["failed"] == 0
+    with SessionLocal() as db:
+        values = [decrypt_secret(r.ciphertext) for r in db.execute(select(SecretRecord)).scalars()]
+    assert "push-hmac-secret" in values
+    assert client.post("/api/v1/security/vault/retire", headers=a).status_code == 200
+    assert client.get("/api/v1/security/posture", headers=a).json()["vault"]["primary"] == rot["primary"]
+    made = client.post("/api/v1/api-clients", headers=a, json={"name": "ops-reader", "scopes": ["read:operations"]}).json()
+    old = {"X-API-Key": made["api_key"]}
+    assert client.get("/api/v1/system/cluster", headers=old).status_code == 200
+    new = client.post(f"/api/v1/api-clients/{made['client']['id']}/rotate", headers=a, json={"grace_hours": 24}).json()
+    assert "previous_key_hash" not in new["client"]
+    assert client.get("/api/v1/system/cluster", headers={"X-API-Key": new["api_key"]}).status_code == 200
+    assert client.get("/api/v1/system/cluster", headers=old).status_code == 200        # grace period
+    newer = client.post(f"/api/v1/api-clients/{made['client']['id']}/rotate", headers=a, json={"grace_hours": 0}).json()
+    assert client.get("/api/v1/system/cluster", headers={"X-API-Key": new["api_key"]}).status_code == 401
+    assert client.get("/api/v1/system/cluster", headers={"X-API-Key": newer["api_key"]}).status_code == 200
+    assert client.get("/api/v1/security/posture", headers=login(client, "2000")).status_code == 403
+
+
+def test_ctr_generation_export_submission_and_statistics(client):
+    from verishield.db import SessionLocal
+    from verishield.models import Tenant
+    from verishield.services.demo import _tz, local_today
+    _demo_on(client)
+    m = login(client, "2000")
+    with SessionLocal() as db:
+        today = local_today(_tz(db.get(Tenant, "BOP"))).date().isoformat()
+    for i, amount in enumerate((6000, 5500)):                    # 11,500 cash in one day, split in two
+        r = client.post("/api/v1/decisions/evaluate", headers=m, json={
+            "transaction_id": f"T-CTR-{i}", "customer_id": "C00012", "transaction_type": "cash_deposit",
+            "amount": amount, "terminal_id": "BR-RAM-01", "location": "Ramallah"})
+        assert r.status_code == 201, r.text
+    gen = client.post("/api/v1/ctr/generate", headers=m, json={"business_date": today}).json()
+    assert gen["threshold"] == 10000
+    reps = client.get(f"/api/v1/ctr?business_date={today}", headers=m).json()["reports"]
+    mine = next(r for r in reps if r["customer_ref"] == "C00012")
+    assert mine["trigger"] == "AGGREGATED" and mine["cash_in"] >= 11500 and mine["status"] == "DRAFT"
+    assert client.post(f"/api/v1/ctr/{mine['id']}/review", headers=m).json()["status"] == "REVIEWED"
+    xml = client.get(f"/api/v1/ctr/export?fmt=xml&ids={mine['id']}", headers=m)
+    assert xml.status_code == 200 and b"<report_code>CTR</report_code>" in xml.content and b"T-CTR-0" in xml.content
+    assert client.get(f"/api/v1/ctr/export?fmt=pdf&ids={mine['id']}", headers=m).content[:4] == b"%PDF"
+    sub = client.post("/api/v1/ctr/submit", headers=m, json={"ids": [mine["id"]], "reference": "REG-CTR-0001"}).json()
+    assert sub["submitted"] == 1
+    assert client.post(f"/api/v1/ctr/{mine['id']}/exempt", headers=m, json={"reason": "already submitted test"}).status_code == 409
+    stats = client.get(f"/api/v1/regulator/statistics?date_from={today}&date_to={today}", headers=login(client, "4000")).json()
+    assert stats["ctr"]["submitted"] >= 1 and stats["transactions"]["total"] >= 2
+    job = client.post("/api/v1/reports", headers=m, json={"type": "regulator_statistics", "format": "pdf",
+                                                             "params": {"date_from": today, "date_to": today}})
+    assert job.status_code in (200, 201), job.text
+
+
+def test_customer_risk_assessment_onboarding_override_four_eyes(client):
+    _demo_on(client)
+    m, chief = login(client, "2000"), login(client, "4000")
+    low = client.post("/api/v1/customers/risk-assessment", headers=m, json={
+        "display_name": "Lina Odeh", "customer_type": "INDIVIDUAL", "occupation": "Teacher", "country": "PS",
+        "tenure_months": 0, "products": ["current_account"]}).json()
+    high = client.post("/api/v1/customers/risk-assessment", headers=m, json={
+        "display_name": "Atlas Money Exchange", "customer_type": "BUSINESS", "business_activity": "Money exchange",
+        "country": "PS", "onboarding_channel": "digital", "products": ["foreign_transfer", "trade_finance"]}).json()
+    assert low["level"] == "LOW" and high["score"] > low["score"] and high["level"] in ("MEDIUM", "HIGH")
+    pep = client.post("/api/v1/customers/risk-assessment", headers=m, json={
+        "display_name": "Prospect", "customer_type": "INDIVIDUAL", "pep": True}).json()
+    assert pep["level"] == "HIGH" and pep["edd_required"]
+    view = client.get("/api/v1/customers/C00013/risk-assessment", headers=m).json()
+    assert view["current"]["factors"] and view["history"], "initial rating stored at seed"
+    up = client.post("/api/v1/customers/C00013/risk-assessment/override", headers=m,
+                     json={"level": "HIGH", "reason": "adverse media about the customer's business partner"}).json()
+    assert up["status"] == "APPLIED"
+    down = client.post("/api/v1/customers/C00013/risk-assessment/override", headers=m,
+                       json={"level": "LOW", "reason": "adverse media cleared after the review of documents"}).json()
+    assert down["status"] == "PENDING_APPROVAL"
+    same = client.post(f"/api/v1/risk-assessments/{down['id']}/approve", headers=m)
+    assert same.status_code == 403 and same.json()["detail"]["code"] == "FOUR_EYES"
+    ok = client.post(f"/api/v1/risk-assessments/{down['id']}/approve", headers=chief).json()
+    assert ok["status"] == "APPLIED"
+    assert client.get("/api/v1/customers/C00013/risk-assessment", headers=m).json()["rating"] == "LOW"
+    pend = client.get("/api/v1/risk-assessments", headers=m).json()
+    assert "distribution" in pend and any(a["id"] == down["id"] for a in pend["assessments"])
+
+
+def test_cheque_duplicate_returned_drawer_and_post_dated(client):
+    from datetime import date, timedelta
+    _demo_on(client)
+    m = login(client, "2000")
+    drawer = "PS92PALS000000000400777000111"
+    base = {"customer_id": "C00014", "transaction_type": "cheque_deposit", "beneficiary_reference": drawer,
+            "drawer_bank": "PALS", "location": "Ramallah"}
+    first = client.post("/api/v1/decisions/evaluate", headers=m, json={
+        **base, "transaction_id": "T-CHQ-1", "amount": 2500, "cheque_number": "551001"})
+    assert first.status_code == 201, first.text
+    dup = client.post("/api/v1/decisions/evaluate", headers=m, json={
+        **base, "transaction_id": "T-CHQ-2", "amount": 2500, "cheque_number": "551001"}).json()
+    assert "DUPLICATE_CHEQUE" in dup["reason_codes"] and dup["decision"] in ("HOLD", "DECLINE")
+    for i in range(2):
+        r = client.post("/api/v1/cheques/returns", headers=m, json={
+            "drawer_account": drawer, "cheque_number": f"55090{i}", "amount": 900, "reason": "INSUFFICIENT_FUNDS"})
+        assert r.status_code == 200, r.text
+    third = client.post("/api/v1/decisions/evaluate", headers=m, json={
+        **base, "transaction_id": "T-CHQ-3", "amount": 1800, "cheque_number": "551002"}).json()
+    assert "RETURNED_CHEQUE_DRAWER" in third["reason_codes"]
+    future = (date.today() + timedelta(days=40)).isoformat()
+    post = client.post("/api/v1/decisions/evaluate", headers=m, json={
+        **base, "transaction_id": "T-CHQ-4", "amount": 700, "cheque_number": "551003", "cheque_date": future}).json()
+    assert "POST_DATED_OR_STALE_CHEQUE" in post["reason_codes"]
+    missing = client.post("/api/v1/decisions/evaluate", headers=m, json={
+        **base, "transaction_id": "T-CHQ-5", "amount": 700})
+    assert missing.status_code == 422 and "cheque number" in missing.text
+    summ = client.get("/api/v1/cheques/summary", headers=m).json()
+    assert summ["returned"] >= 2 and any(d["account"] == drawer for d in summ["top_drawers"])
+    # returned-cheque events through the ingestion API as well
+    key = {"X-API-Key": client.post("/api/v1/api-clients", headers=login(client, "1000"), json={
+        "name": "clearing", "scopes": ["events:write"]}).json()["api_key"]}
+    ev = client.post("/api/v1/transactions/events", headers=key, json={"events": [
+        {"record_type": "cheque_return", "transaction_id": "T-CHQ-1", "reason": "SIGNATURE"}]})
+    assert ev.status_code in (200, 202), ev.text
+
+
+def test_network_rings_and_mule_account_signal(client):
+    _demo_on(client)
+    m = login(client, "2000")
+    inj = client.post("/api/v1/demo/scenarios", headers=m, json={"scenario": "shared_counterparty"}).json()["results"]
+    refs = {r["customer_id"] for r in inj}
+    from verishield.db import SessionLocal
+    from verishield.models import Transaction
+    with SessionLocal() as db:
+        mule = db.execute(select(Transaction.beneficiary).where(Transaction.tx_ref == inj[0]["transaction_id"])).scalar()
+    out = client.post("/api/v1/networks/recompute", headers=m).json()
+    assert out["rings"] >= 1 and out["seeds"] >= 1
+    rings = client.get("/api/v1/networks/rings", headers=m).json()["rings"]
+    ring = next(r for r in rings if refs & {x["customer_ref"] for x in r["members"]})
+    assert ring["max_score"] > 0.5 and ring["seeded"] >= 1
+    mules = client.get("/api/v1/networks/mules", headers=m).json()["accounts"]
+    assert any(x["account"] == mule for x in mules)
+    nxt = client.post("/api/v1/decisions/evaluate", headers=m, json={
+        "transaction_id": "T-MULE-NEXT", "customer_id": "C00015", "transaction_type": "bank_transfer", "amount": 650,
+        "beneficiary_reference": mule}).json()
+    assert "MULE_ACCOUNT_SUSPECTED" in nxt["reason_codes"] and nxt["decision"] in ("REVIEW", "HOLD", "DECLINE")
+    assert client.get("/api/v1/networks/rings", headers=login(client, "3001")).status_code == 403
+
+
+def test_push_confirmation_card_freeze_and_siem_forwarding(client):
+    import socket
+    from datetime import timedelta
+    from verishield.db import SessionLocal
+    from verishield.models import CustomerConfirmation, Tenant, Transaction, utcnow
+    from verishield.services import confirmations, siem
+    from verishield.services.policy import active_policy
+    a = _demo_on(client)
+    m = login(client, "2000")
+    card = {"customer_id": "C00016", "transaction_type": "card_payment", "merchant": "Global E-Shop", "mcc": "5732",
+            "merchant_country": "GB", "entry_mode": "ECOM", "card_ref": "CARD-TEST-0016"}
+    client.post("/api/v1/decisions/evaluate", headers=m, json={**card, "transaction_id": "T-CARD-1", "amount": 9500})
+    with SessionLocal() as db:
+        conf = db.execute(select(CustomerConfirmation).where(CustomerConfirmation.tx_ref == "T-CARD-1")).scalar()
+        if conf is None:      # make sure there is a confirmation even if the policy reviewed instead of holding
+            tx = db.execute(select(Transaction).where(Transaction.tx_ref == "T-CARD-1")).scalar()
+            tx.mode, tx.execution_state = "PRE_AUTH", "HELD"
+            db.commit()
+            conf = confirmations.request_confirmation(db, db.get(Tenant, "BOP"), tx, None,
+                                                      active_policy(db, "BOP").document)
+        assert conf.channel == "PUSH" and conf.fallback_at is not None      # app first, SMS later
+        conf.fallback_at = utcnow() - timedelta(seconds=1)
+        db.commit()
+        assert confirmations.push_fallback(db) >= 1
+        db.refresh(conf)
+        assert conf.channel == "PUSH+SMS" and conf.status == "SENT"
+        cid = conf.id
+    app = {"X-API-Key": client.post("/api/v1/api-clients", headers=a, json={
+        "name": "mobile app backend", "scopes": ["confirmations:respond", "cards:control"]}).json()["api_key"]}
+    wrong = client.post(f"/api/v1/confirmations/{cid}/respond", headers=app, json={"answer": "NO", "customer_id": "C99999"})
+    assert wrong.status_code == 403
+    res = client.post(f"/api/v1/confirmations/{cid}/respond", headers=app, json={"answer": "NO"}).json()
+    assert res["result"].startswith("rejected") and res["card_frozen"] == "CARD-TEST-0016"
+    frozen = client.get("/api/v1/cards/frozen", headers=m).json()
+    assert any(c["card_ref"] == "CARD-TEST-0016" and c["status"] == "FROZEN" for c in frozen["controls"])
+    nxt = client.post("/api/v1/decisions/evaluate", headers=m, json={**card, "transaction_id": "T-CARD-2", "amount": 20}).json()
+    assert nxt["decision"] == "DECLINE" and "CARD_FROZEN" in nxt["reason_codes"]
+    assert client.post("/api/v1/cards/CARD-TEST-0016/unfreeze", headers=app, json={}).status_code == 403
+    assert client.post("/api/v1/cards/CARD-TEST-0016/unfreeze", headers=m, json={"reason": "case closed"}).json()["status"] == "ACTIVE"
+    own = client.post("/api/v1/cards/CARD-TEST-0016/freeze", headers=app, json={"customer_id": "C00016"}).json()
+    assert own["source"] == "CUSTOMER_APP"
+    assert client.post("/api/v1/cards/CARD-TEST-0016/unfreeze", headers=app, json={}).json()["status"] == "ACTIVE"
+    cards = client.get("/api/v1/customers/C00016/cards", headers=m).json()["cards"]
+    assert any(c["card_ref"] == "CARD-TEST-0016" and len(c["history"]) >= 2 for c in cards)
+    # SIEM: CEF over UDP
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.bind(("127.0.0.1", 0))
+    sock.settimeout(5)
+    port = sock.getsockname()[1]
+    put = client.put("/api/v1/siem", headers=a, json={"enabled": True, "protocol": "udp", "host": "127.0.0.1",
+                                                       "port": port, "format": "cef", "include_demo": True})
+    assert put.status_code == 200, put.text
+    assert client.post("/api/v1/siem/test", headers=a).json()["ok"]
+    assert b"CEF:0|VeriShield|VeriShield|" in sock.recvfrom(9000)[0]
+    with SessionLocal() as db:
+        siem.forward(db)                                          # initialises the cursor
+    client.put("/api/v1/siem", headers=a, json={"batch": 100})       # an audited configuration change
+    with SessionLocal() as db:
+        sent = siem.forward(db)
+        assert sent >= 1, siem.public(db, db.get(Tenant, "BOP"))
+    got = sock.recvfrom(9000)[0]
+    assert b"act=siem.update" in got and b"suser=" in got
+    sock.close()
+    client.put("/api/v1/siem", headers=a, json={"enabled": False})

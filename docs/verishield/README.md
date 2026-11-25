@@ -75,6 +75,46 @@ default on outside production). With `VERISHIELD_ENV=production` only the bootst
 temporary password must be changed at first sign-in. **Forgot password?** on the sign-in page sends a one-time code by
 e-mail or SMS (in development, when no gateway is switched on, the code is shown on screen).
 
+### What's new in 1.4
+
+Before production
+* **High availability** - several application servers share one PostgreSQL database. Every server scores
+  decisions; a database lease elects one leader that runs the channels and background jobs and is taken over
+  within 30 s if the leader stops. Servers absorb each other's learning and share signed model checkpoints; the
+  audit chain is serialised with a row lock. *Operations › Cluster*; deployment guide in `deploy/ha/README.md`.
+* **Security hardening** - Content-Security-Policy and further browser security headers, vault key ring with
+  rotation and retirement, API-key rotation with a grace period, a scored **security posture** check for the IT
+  Admin (*Users & Settings › Security posture*), protected `/metrics`, XML upload protection, URL scheme checks and
+  HMAC-signed checkpoints. `deploy/security/scan.py` runs bandit + pip-audit before a release.
+
+Compliance
+* **Cash transaction reports (CTR)** - generated for every customer whose cash in or out reaches the reporting
+  threshold on a business day, in one operation or aggregated; review, exemption with reason, submission
+  reference, goAML-style XML / CSV / PDF export (*Regulatory Reports › Cash transaction reports*).
+* **Regulator statistics** - periodic AML statistics return (transactions monitored, decisions, alerts, cases and
+  handling time, STR, CTR, screening, confirmations, risk distribution, KYC reviews) on screen and as a PDF report.
+* **Customer risk assessment (CRA)** - weighted factors (geography, customer type, activity, products,
+  onboarding channel, PEP / sanctions, behaviour, adverse history incl. returned cheques, network risk, tenure),
+  minimum levels, onboarding API (`POST /api/v1/customers/risk-assessment`), daily re-assessment, overrides,
+  **four-eyes approval of downgrades**, history and an editable model (*Customer Reviews & Risk*).
+
+Detection
+* **Cheque fraud** - cheque deposits and own cheques are profiled by the engine; duplicate presentment, cheque-book
+  sequence anomalies (stolen books), bounced-cheque drawers, post-dated / stale cheques and kiting are detected;
+  returned cheques arrive as `cheque_return` events or are recorded on the *Cheques* page.
+* **Network risk scoring** - rings of customers linked by transfer payees, devices and IPs; risk propagated from
+  confirmed fraud, STR subjects, watch list and sanctions matches; live **mule-account score** of every payee in
+  the decision (*Networks & Mule Accounts*).
+
+Operations & customer experience
+* **Monitoring & SIEM** - audit and security events forwarded in order to the SIEM (syslog UDP / TCP / TLS with CEF
+  or JSON, or an HTTPS collector such as Splunk HEC), with a cursor so nothing is lost; business and cluster gauges
+  on `/metrics`; Grafana dashboard and Prometheus alert rules in `deploy/monitoring/`.
+* **In-app confirmation and card freeze** - held payments are confirmed in the bank's mobile app first (signed
+  webhook, `POST /api/v1/confirmations/{id}/respond`), with SMS as fallback; a NO on a card payment freezes the card
+  (command to the card system, and VeriShield declines the card while frozen); customers can freeze their own
+  cards; the AML team releases bank freezes.
+
 ### What's new in 1.3
 
 Detection

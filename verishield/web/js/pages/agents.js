@@ -52,8 +52,9 @@ export async function render(el) {
       <p class="tiny muted" style="margin-top:8px">Scopes: mcp:use, read:operations, read:aml, read:executive, policies:simulate, reports:generate. Transaction and customer data are returned masked.</p>`,
       actions: [{ label: "Cancel" }, { label: "Create", cls: "primary", onClick: (m) => api.post("/mcp/keys", { name: m.querySelector("[name=name]").value, space: m.querySelector("[name=space]").value }) }] });
     if (!r) return;
-    await modal({ title: "MCP access key", body: `<div class="notice warn" style="margin-bottom:12px">${esc(r.note)}</div><input class="input mono" readonly value="${esc(r.api_key)}" onclick="this.select()">`,
-      actions: [{ label: "I have stored it securely", cls: "primary", value: true }] });
+    await modal({ title: "MCP access key", body: `<div class="notice warn" style="margin-bottom:12px">${esc(r.note)}</div><input class="input mono" readonly value="${esc(r.api_key)}" data-selectall>`,
+      actions: [{ label: "I have stored it securely", cls: "primary", value: true }],
+      onOpen: (m) => m.querySelectorAll("[data-selectall]").forEach((i) => (i.onclick = () => i.select())) });
     render(el);
   };
   el.querySelectorAll("[data-rev]").forEach((b) => (b.onclick = async () => {

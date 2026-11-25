@@ -6,7 +6,7 @@ from datetime import datetime
 from typing import Any, Optional
 
 TX_TYPES = ("bank_transfer", "phone_recharge", "prepaid_card", "card_payment", "cash_withdrawal", "cash_deposit",
-            "incoming_transfer")
+            "incoming_transfer", "cheque_deposit", "cheque_payment")
 TX_TYPE_LABELS = {
     "bank_transfer": "Bank transfer",
     "phone_recharge": "Phone recharge",
@@ -15,8 +15,11 @@ TX_TYPE_LABELS = {
     "cash_withdrawal": "Cash withdrawal (ATM / branch)",
     "cash_deposit": "Cash deposit",
     "incoming_transfer": "Incoming transfer",
+    "cheque_deposit": "Cheque deposit (drawn on another account)",
+    "cheque_payment": "Cheque payment (customer's own cheque presented)",
 }
-OUTFLOW_TYPES = ("bank_transfer", "phone_recharge", "prepaid_card", "card_payment", "cash_withdrawal")
+OUTFLOW_TYPES = ("bank_transfer", "phone_recharge", "prepaid_card", "card_payment", "cash_withdrawal", "cheque_payment")
+CHEQUE_TYPES = ("cheque_deposit", "cheque_payment")
 RISK_LEVELS = ("LOW", "MEDIUM", "HIGH", "CRITICAL")
 
 
@@ -50,6 +53,9 @@ class Transaction:
     location: Optional[str] = None      # cash: city / location of the terminal
     counterparty: Optional[str] = None  # incoming transfers: originator IBAN
     counterparty_cc: Optional[str] = None
+    cheque_number: Optional[str] = None   # cheques: serial number printed on the cheque
+    drawer_bank: Optional[str] = None     # cheque deposits: bank code of the drawer's bank
+    cheque_date: Optional[str] = None     # date written on the cheque (YYYY-MM-DD; post-dated / stale checks)
 
     @property
     def hour(self) -> float:
@@ -66,7 +72,7 @@ class Transaction:
             return self.merchant
         if self.tx_type in ("cash_withdrawal", "cash_deposit"):
             return self.terminal
-        if self.tx_type == "incoming_transfer":
+        if self.tx_type in ("incoming_transfer", "cheque_deposit", "cheque_payment"):
             return self.counterparty
         return self.card_id
 
@@ -74,7 +80,7 @@ class Transaction:
     def counterparty_country(self) -> Optional[str]:
         if self.tx_type == "card_payment":
             return self.merchant_cc
-        if self.tx_type == "incoming_transfer":
+        if self.tx_type in ("incoming_transfer", "cheque_deposit", "cheque_payment"):
             return self.counterparty_cc
         return self.iban_cc
 

@@ -265,8 +265,16 @@ def parse_ofac_sdn(content: bytes) -> list[dict]:
     return rows
 
 
+def _safe_xml(content: bytes):
+    """Parse an uploaded list without DTDs or entities (no entity expansion / external entity attacks)."""
+    head = content[:4096].upper()
+    if b"<!DOCTYPE" in head or b"<!ENTITY" in content.upper():
+        raise ValueError("XML files with a DOCTYPE or entity declarations are not accepted")
+    return ET.fromstring(content)
+
+
 def parse_un_xml(content: bytes) -> list[dict]:
-    root = ET.fromstring(content)
+    root = _safe_xml(content)
     rows = []
     for tag, typ in (("INDIVIDUAL", "INDIVIDUAL"), ("ENTITY", "ENTITY")):
         for el in root.iter(tag):
@@ -285,7 +293,7 @@ def parse_un_xml(content: bytes) -> list[dict]:
 
 
 def parse_eu_xml(content: bytes) -> list[dict]:
-    root = ET.fromstring(content)
+    root = _safe_xml(content)
     rows = []
     for ent in root.iter():
         if not ent.tag.endswith("sanctionEntity"):

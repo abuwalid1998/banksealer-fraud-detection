@@ -52,9 +52,16 @@ def put_notifications(body: dict, p: Principal = Depends(require_user("notificat
     before = notify.public_config(t)
     current = copy.deepcopy((t.settings or {}).get("notifications") or {})
     e, s, ev = body.get("email") or {}, body.get("sms") or {}, body.get("events") or {}
-    for key in ("password_ref", "token_ref"):
+    pu = body.get("push") or {}
+    for key in ("password_ref", "token_ref", "secret_ref"):
         e.pop(key, None)
         s.pop(key, None)
+        pu.pop(key, None)
+    if pu:
+        if pu.get("url") and not str(pu["url"]).startswith(("http://", "https://")):
+            _bad("the mobile push URL must start with http:// or https://")
+        allowed = set(notify.DEFAULTS["push"]) - {"secret_ref"}
+        current["push"] = {**(current.get("push") or {}), **{k: v for k, v in pu.items() if k in allowed}}
     if e:
         if e.get("security") and e["security"] not in notify.SECURITY:
             _bad(f"security must be one of {', '.join(notify.SECURITY)}")
@@ -95,12 +102,12 @@ def put_notifications(body: dict, p: Principal = Depends(require_user("notificat
 def set_notification_secret(body: dict, p: Principal = Depends(require_user("notifications.manage")),
                             db: Session = Depends(get_db)):
     channel, value = body.get("channel"), str(body.get("value") or "")
-    if channel not in ("email", "sms") or not value:
-        _bad("send {channel: email|sms, value}")
+    if channel not in ("email", "sms", "push") or not value:
+        _bad("send {channel: email|sms|push, value}")
     t = db.get(Tenant, p.tenant_id)
     current = copy.deepcopy((t.settings or {}).get("notifications") or {})
     section = current.setdefault(channel, {})
-    key = "password_ref" if channel == "email" else "token_ref"
+    key = {"email": "password_ref", "sms": "token_ref", "push": "secret_ref"}[channel]
     section[key] = store_secret(db, p.tenant_id, f"{channel} gateway credential", value, p.user_id, section.get(key))
     t.settings = {**(t.settings or {}), "notifications": current}
     db.commit()
@@ -116,6 +123,9 @@ def test_notification(body: dict, p: Principal = Depends(require_user("notificat
     to = str(body.get("to") or "").strip()
     if body.get("channel") == "sms":
         ok, detail = notify.send_sms(db, t, to, f"VeriShield test message from {t.display_name}.", "test")
+    elif body.get("channel") == "push":
+        ok, detail = notify.send_push(db, t, {"type": "TEST", "customer_id": to or "TEST",
+                                              "message": f"VeriShield test notification from {t.display_name}."}, "test")
     else:
         ok, detail = notify.send_email(db, t, to, "VeriShield test e-mail",
                                        f"This is a test message from VeriShield at {t.display_name}. "
@@ -238,7 +248,7 @@ def _base_url(request: Request) -> str:
 @router.get("/mcp/settings")
 def mcp_settings(request: Request, p: Principal = Depends(require("mcp.manage")), db: Session = Depends(get_db)):
     t = db.get(Tenant, p.tenant_id)
-    keys = [row_dict(c, exclude=("key_hash",)) for c in db.execute(select(ApiClient).where(
+    keys = [row_dict(c, exclude=("key_hash", "previous_key_hash")) for c in db.execute(select(ApiClient).where(
         ApiClient.tenant_id == p.tenant_id)).scalars() if "mcp:use" in (c.scopes or [])]
     calls = db.execute(select(AuditEvent).where(AuditEvent.tenant_id == p.tenant_id,
                                                 AuditEvent.action.like("mcp.%")).order_by(AuditEvent.id.desc())
@@ -301,7 +311,7 @@ def mcp_key(body: dict, p: Principal = Depends(require_user("mcp.manage")), db: 
     db.commit()
     audit.record(db, p.tenant_id, "mcp.key_create", actor=p, resource_type="api_client", resource_id=client.id,
                  after={"name": client.name, "scopes": scopes, "space": space})
-    return {"client": row_dict(client, exclude=("key_hash",)), "api_key": key,
+    return {"client": row_dict(client, exclude=("key_hash", "previous_key_hash")), "api_key": key,
             "note": f"Copy the key now - it is shown only once. Agents using it see the {space} workspace."}
 
 

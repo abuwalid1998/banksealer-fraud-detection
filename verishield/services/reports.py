@@ -578,7 +578,56 @@ def r_demo(db: Session, p: Principal, params: dict, tenant: Tenant) -> Doc:
     return doc
 
 
+def r_regulator(db: Session, p: Principal, params: dict, tenant: Tenant) -> Doc:
+    """Periodic AML statistics return for the regulator (default: the previous calendar month)."""
+    from .ctr import statistics
+    if params.get("date_from") or params.get("days"):
+        start, end = _range(params)
+    else:
+        first = utcnow().replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        end = first
+        start = (first - timedelta(days=1)).replace(day=1)
+    s = statistics(db, p.tenant_id, p.space, start, end)
+    cur = tenant.base_currency
+    doc = Doc("Periodic AML Statistics Return", f"{s['period']['from']} to {s['period']['to']}")
+    doc.meta = {"eyebrow": "REGULATORY REPORTING"}
+    doc.summary = (f"In the period the institution monitored {s['transactions']['total']:,} transactions in real time. "
+                   f"{s['alerts']['total']:,} alerts were raised, {s['cases']['opened']:,} AML cases opened and "
+                   f"{s['cases']['closed']:,} closed. {s['str']['total']:,} suspicious transaction report(s) and "
+                   f"{s['ctr']['total']:,} cash transaction report(s) were prepared.")
+    doc.kpi("Transactions monitored", f"{s['transactions']['total']:,}").kpi("Alerts", f"{s['alerts']['total']:,}") \
+        .kpi("Cases opened / closed", f"{s['cases']['opened']:,} / {s['cases']['closed']:,}") \
+        .kpi("STR prepared", f"{s['str']['total']:,}").kpi("CTR prepared", f"{s['ctr']['total']:,}") \
+        .kpi("Average days to close", s["cases"]["avg_days_to_close"] if s["cases"]["avg_days_to_close"] is not None else "-")
+    doc.table("Transactions monitored by type", ["Type", "Transactions"],
+              [[k.replace("_", " ").title(), v] for k, v in sorted(s["transactions"]["by_type"].items())], main=True)
+    doc.table("Real-time decisions", ["Decision", "Count"], [[k, v] for k, v in sorted(s["decisions"].items())])
+    doc.table("Alerts by severity", ["Severity", "Alerts"],
+              [[k, s["alerts"]["by_severity"].get(k, 0)] for k in ("CRITICAL", "HIGH", "MEDIUM", "LOW")])
+    doc.table("Investigations", ["Measure", "Value"], [
+        ["Cases opened", s["cases"]["opened"]], ["Cases closed", s["cases"]["closed"]],
+        ["Average days to close", s["cases"]["avg_days_to_close"] if s["cases"]["avg_days_to_close"] is not None else "-"],
+        ["Cases open at the end of the period", s["cases"]["open_at_end"]]])
+    doc.table("Suspicious transaction reports", ["Status", "Reports"],
+              [[k.title(), v] for k, v in sorted(s["str"]["by_status"].items())] or [["-", 0]])
+    doc.table("Cash transaction reports", ["Measure", "Value"], [
+        ["Reports", s["ctr"]["total"]], ["Submitted", s["ctr"]["submitted"]], ["Exempt", s["ctr"]["exempt"]],
+        [f"Cash deposits reported ({cur})", f"{s['ctr']['cash_in']:,.2f}"],
+        [f"Cash withdrawals reported ({cur})", f"{s['ctr']['cash_out']:,.2f}"]])
+    doc.table("Sanctions / PEP screening", ["Status", "Matches"],
+              [[k.replace("_", " ").title(), v] for k, v in sorted(s["screening"]["by_status"].items())] or [["-", 0]])
+    doc.table("Customer confirmations of held payments", ["Outcome", "Count"],
+              [[k.title(), v] for k, v in sorted(s["confirmations"].items())] or [["-", 0]])
+    doc.table("Customers by risk rating", ["Risk rating", "Customers"],
+              [[k, s["customers_by_risk"].get(k, 0)] for k in ("LOW", "MEDIUM", "HIGH")])
+    doc.table("Periodic KYC reviews", ["Measure", "Value"], [["Completed in the period", s["kyc_reviews"]["completed"]],
+                                                            ["Overdue at the end of the period", s["kyc_reviews"]["overdue"]]])
+    return doc
+
+
 CATALOGUE: dict[str, dict] = {
+    "regulator_statistics": {"title": "Periodic AML statistics return (regulator)", "builder": r_regulator,
+                             "perms": ("reports.aml", "reports.executive", "reports.board")},
     "board_overview": {"title": "Board report - fraud, AML & platform overview", "builder": r_board,
                        "perms": ("reports.board", "reports.executive")},
     "customer_portfolio": {"title": "Customer portfolio report", "builder": r_portfolio,

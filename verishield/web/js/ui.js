@@ -78,6 +78,12 @@ const P = {
   reviews: "M9 11l2 2 4-4M5 4h14v17H5zM9 2h6v4H9z",
   str: "M6 3h9l4 4v14H6zM14 3v5h5M9 13h7M9 17h5",
   network: "M6 6a2 2 0 1 0 0-.01M18 6a2 2 0 1 0 0-.01M12 18a2 2 0 1 0 0-.01M7.5 7.5l3.4 8.8M16.5 7.5l-3.4 8.8M8 6h8",
+  networks: "M5 7a2 2 0 1 0 0-.01M19 7a2 2 0 1 0 0-.01M12 19a2 2 0 1 0 0-.01M5 19a2 2 0 1 0 0-.01M7 7h10M6 9l5 8M18 9l-5 8M7 19h3",
+  cheques: "M3 7h18v10H3zM6 11h7M6 14h4M15 14h3M17 7V5",
+  card: "M3 6h18v12H3zM3 10h18M7 15h4",
+  lock: "M7 11V8a5 5 0 0 1 10 0v3M5 11h14v10H5z",
+  shield: "M12 3l8 3v6c0 4.5-3.4 8.3-8 9-4.6-.7-8-4.5-8-9V6z",
+  server: "M4 4h16v6H4zM4 14h16v6H4zM8 7h.01M8 17h.01",
   sparkle: "M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8zM19 16l.8 2.2L22 19l-2.2.8L19 22l-.8-2.2L16 19l2.2-.8z",
 };
 export function icon(name, extra = "") {

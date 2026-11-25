@@ -34,6 +34,7 @@ from sqlalchemy.orm import Session
 from banksealer.preparation import TransactionPreparer
 
 from ..db import SessionLocal
+from ..settings import settings
 from ..models import ApiClient, Connector, ConnectorLog, SecretRecord, utcnow
 from ..security import decrypt_secret, encrypt_secret, mask, mask_ip, sanitize_error
 from .metrics import metrics
@@ -214,7 +215,8 @@ def _http(db: Session, c: Connector, method: str = "GET", body: Optional[dict] =
             import hmac
             secret = resolve_secret(db, c.tenant_id, c.secret_ref) or ""
             headers["X-VeriShield-Signature"] = hmac.new(secret.encode(), data, hashlib.sha256).hexdigest()
-    req = urllib.request.Request(url, data=data, method=method, headers=headers)
+    from ..security import check_url
+    req = urllib.request.Request(check_url(url), data=data, method=method, headers=headers)
     ctx = None
     if url.startswith("https://") and not c.tls_verify:
         import ssl
@@ -590,6 +592,9 @@ class RuntimeManager:
         info = CONNECTOR_TYPES.get(c.type, {})
         if not info.get("runtime") or c.type in ("rest_webhook", "outbound_webhook"):
             return
+        from . import cluster
+        if settings.cluster_mode and not cluster.is_leader():
+            return                 # the leader node starts it within a few seconds (cluster.heartbeat)
         with self.lock:
             old = self.runners.get(c.id)
             if old and old.is_alive():
@@ -616,6 +621,11 @@ class RuntimeManager:
     def status(self, cid: str) -> dict:
         r = self.runners.get(cid)
         if r is None:
+            if settings.cluster_mode:
+                from . import cluster
+                remote = cluster.state.peers.get(cid)
+                if remote:
+                    return dict(remote, node=cluster.state.leader_node)
             return {"running": False}
         return {"running": r.is_alive(), "since": r.started_at.isoformat(timespec="seconds") + "Z",
                 "session_stats": dict(r.stats), "last_error": r.last_error, "last_batch_ms": r.last_batch_ms}
@@ -626,6 +636,21 @@ runtime = RuntimeManager()
 
 def start_enabled(db: Session) -> None:
     for c in db.execute(select(Connector).where(Connector.status.in_(("ENABLED", "DEGRADED")))).scalars():
+        try:
+            runtime.start(c)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("could not start connector %s: %s", c.id, exc)
+    db.commit()
+
+
+def reconcile(db: Session) -> None:
+    """Leader: run exactly the connectors that are enabled (they may have been changed through another node)."""
+    wanted = {c.id: c for c in db.execute(select(Connector).where(Connector.status.in_(("ENABLED", "DEGRADED"))))
+              .scalars()}
+    for cid in list(runtime.runners):
+        if cid not in wanted:
+            runtime.stop(cid)
+    for c in wanted.values():
         try:
             runtime.start(c)
         except Exception as exc:  # noqa: BLE001
@@ -668,5 +693,5 @@ def set_state(db: Session, c: Connector, action: str, actor: str, demo_workspace
 
 
 __all__ = ["CONNECTOR_TYPES", "STATUSES", "public", "validate", "test_connection", "preview_mapping",
-           "store_secret", "resolve_secret", "send_bank_command", "runtime", "start_enabled", "set_state",
+           "store_secret", "resolve_secret", "send_bank_command", "runtime", "start_enabled", "reconcile", "set_state",
            "ConnectorError", "add_log", "datetime", "timedelta"]

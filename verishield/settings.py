@@ -7,6 +7,7 @@ an ``.env`` file (see ``.env.example``).
 from __future__ import annotations
 
 import os
+import socket
 import secrets
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -63,6 +64,10 @@ class Settings:
     show_dev_accounts: bool = True            # list development accounts on the sign-in page
     demo_fixed_passwords: bool = True         # test accounts keep their passwords (no first-login change)
     background_jobs: bool = True
+    cluster_mode: bool = False                # several application servers share one PostgreSQL database
+    node_id: str = ""                         # unique name of this server in a cluster (default host:port)
+    metrics_token: str = ""                   # bearer token required by /metrics (empty = open on the network)
+    trust_proxy: bool = False                 # HTTPS is terminated by a load balancer / reverse proxy
     engine_config: Path = ROOT / "config" / "banksealer.yaml"
 
     @property
@@ -144,6 +149,11 @@ def load_settings() -> Settings:
         log_file=os.environ.get("VERISHIELD_LOG_FILE", ""),
         show_dev_accounts=_bool("VERISHIELD_SHOW_DEV_ACCOUNTS", not production),
         demo_fixed_passwords=_bool("VERISHIELD_DEMO_FIXED_PASSWORDS", not production),
+        cluster_mode=_bool("VERISHIELD_CLUSTER", False),
+        node_id=os.environ.get("VERISHIELD_NODE_ID", "") or
+        f"{socket.gethostname()}:{os.environ.get('PORT', os.environ.get('VERISHIELD_PORT', '8000'))}",
+        metrics_token=os.environ.get("VERISHIELD_METRICS_TOKEN", ""),
+        trust_proxy=_bool("VERISHIELD_TRUST_PROXY", False),
     )
 
 

@@ -1,4 +1,9 @@
-"""Customer confirmation of held payments by SMS.
+"""Customer confirmation of held payments - in the bank's mobile app (push) and/or by SMS.
+
+Channel (policy ``signals.confirmation_channel``): ``PUSH_THEN_SMS`` (default: the app first, SMS if there is no
+answer after ``push_fallback_seconds``), ``PUSH`` or ``SMS``. The app backend answers through
+``POST /api/v1/confirmations/{id}/respond`` (API key with the ``confirmations:respond`` scope); a NO on a card
+payment also freezes the card (``freeze_card_on_denial``).
 
 When a pre-authorisation payment is HELD, the customer receives an SMS ("Did you send 5,000 ILS to ...? Reply
 1 = yes, 2 = no"). The answer comes back through the SMS gateway's inbound webhook
@@ -36,13 +41,42 @@ def customer_phone(db: Session, tenant_id: str, space: str, customer_ref: str) -
     return str((c.attributes or {}).get("phone") or "") if c else ""
 
 
+INBOUND_TYPES = ("incoming_transfer", "cash_deposit", "cheque_deposit")
+
+
+def _push_payload(tenant: Tenant, conf: CustomerConfirmation, tx: Transaction, to: str) -> dict:
+    return {"type": "PAYMENT_CONFIRMATION", "confirmation_id": conf.id, "customer_id": tx.customer_ref,
+            "transaction_id": tx.tx_ref, "amount": round(float(tx.amount), 2), "currency": tx.currency,
+            "transaction_type": tx.tx_type, "counterparty": to, "channel": tx.channel,
+            "card_reference": (tx.details or {}).get("card_ref") or "",
+            "message": f"Did you make a {tx.tx_type.replace('_', ' ')} of {tx.amount:,.2f} {tx.currency} to {to}?",
+            "expires_at": conf.expires_at.isoformat(timespec="seconds") + "Z",
+            "respond_path": f"/api/v1/confirmations/{conf.id}/respond",
+            "answers": ["YES", "NO"], "institution": tenant.display_name}
+
+
+def _send_sms(db: Session, tenant: Tenant, conf: CustomerConfirmation) -> bool:
+    if not conf.phone:
+        return False
+    if conf.space == "DEMO":
+        notify._record(db, tenant.id, "SMS", conf.phone, "", conf.message, "SIMULATED", "Demo Mode: SMS simulated",
+                       "customer_confirmation")
+        return True
+    ok, detail = notify.send_sms(db, tenant, conf.phone, conf.message, "customer_confirmation")
+    if not ok:
+        conf.reply = detail[:200]
+    return ok
+
+
 def request_confirmation(db: Session, tenant: Tenant, tx: Transaction, dec: Decision, doc: dict
                          ) -> Optional[CustomerConfirmation]:
     c = cfg(doc)
-    if not c.get("confirmation_sms") or tx.tx_type in ("incoming_transfer", "cash_deposit"):
+    if not c.get("confirmation_sms") or tx.tx_type in INBOUND_TYPES:
         return None
     phone = customer_phone(db, tenant.id, tx.space, tx.customer_ref)
-    if not phone:
+    channel = str(c.get("confirmation_channel") or "SMS").upper()
+    push_on = channel in ("PUSH", "PUSH_THEN_SMS") and (tx.space == "DEMO" or notify.push_ready(tenant))
+    if not phone and not push_on:
         return None
     code = f"{secrets.randbelow(9000) + 1000}"
     to = (tx.details or {}).get("beneficiary_name") or tx.beneficiary or "the beneficiary"
@@ -51,6 +85,31 @@ def request_confirmation(db: Session, tenant: Tenant, tx: Transaction, dec: Deci
     conf = CustomerConfirmation(tenant_id=tenant.id, space=tx.space, tx_ref=tx.tx_ref, customer_ref=tx.customer_ref,
                                 phone=phone, code=code, message=text,
                                 expires_at=utcnow() + timedelta(minutes=int(c.get("confirmation_minutes", 30))))
+    if push_on:
+        db.add(conf)
+        db.flush()
+        conf.channel = "PUSH"
+        payload = _push_payload(tenant, conf, tx, to)
+        if tx.space == "DEMO":
+            ok = True
+            notify._record(db, tenant.id, "PUSH", tx.customer_ref, "", payload["message"], "SIMULATED",
+                           "Demo Mode: app notification simulated", "customer_confirmation")
+        else:
+            ok, _ = notify.send_push(db, tenant, payload)
+        if ok:
+            conf.status = "SENT"
+            if channel == "PUSH_THEN_SMS" and phone:
+                conf.fallback_at = utcnow() + timedelta(seconds=int(c.get("push_fallback_seconds", 120)))
+            db.commit()
+            return conf
+        if channel == "PUSH" or not phone:          # push failed and no SMS fallback
+            conf.status = "NOT_SENT"
+            db.commit()
+            return conf
+        conf.channel = "PUSH+SMS"                     # push failed: SMS straight away
+        conf.status = "SENT" if _send_sms(db, tenant, conf) else "NOT_SENT"
+        db.commit()
+        return conf
     if tx.space == "DEMO":
         conf.status = "SENT"            # simulated delivery; answer it from the transaction or Confirmations page
         notify._record(db, tenant.id, "SMS", phone, "", text, "SIMULATED", "Demo Mode: SMS simulated",
@@ -81,7 +140,8 @@ def _find(db: Session, tenant_id: str, phone: str, text: str) -> Optional[Custom
     return None
 
 
-def answer(db: Session, conf: CustomerConfirmation, reply: str, actor: str = "customer SMS") -> dict:
+def answer(db: Session, conf: CustomerConfirmation, reply: str, actor: str = "customer SMS", via: str = "SMS",
+           freeze_card: Optional[bool] = None) -> dict:
     from .cases import create_case
     from .decision import request_bank_action
     from ..deps import Principal
@@ -91,7 +151,7 @@ def answer(db: Session, conf: CustomerConfirmation, reply: str, actor: str = "cu
     word = (reply or "").strip().split()[0].upper() if (reply or "").strip() else ""
     if word not in YES | NO:
         raise ValueError("reply must be 1 (yes) or 2 (no)")
-    conf.reply, conf.answered_at = reply[:200], utcnow()
+    conf.reply, conf.answered_at, conf.answered_via = reply[:200], utcnow(), via[:16]
     tx = db.execute(select(Transaction).where(Transaction.tenant_id == conf.tenant_id, Transaction.space == conf.space,
                                               Transaction.tx_ref == conf.tx_ref)).scalar()
     system = Principal(tenant_id=conf.tenant_id, kind="user", role="AML_MANAGER",
@@ -126,6 +186,16 @@ def answer(db: Session, conf: CustomerConfirmation, reply: str, actor: str = "cu
         auto_assign(db, case, force=True)
         out["case_id"] = case.id
         out["result"] = "rejected - case opened"
+        if tx is not None:
+            from . import cards
+            from .policy import active_policy
+            wanted = freeze_card if freeze_card is not None else \
+                cfg(active_policy(db, conf.tenant_id).document).get("freeze_card_on_denial", True)
+            if wanted:
+                ctl = cards.freeze_for_transaction(db, tx, f"Customer denied {tx.tx_ref} ({via})", "AUTO", actor,
+                                                   case.id)
+                if ctl is not None:
+                    out["card_frozen"] = ctl.card_ref
     db.commit()
     audit.record(db, conf.tenant_id, "confirmation.answer", actor=actor, resource_type="transaction",
                  resource_id=conf.tx_ref, space=conf.space, after=out)
@@ -139,7 +209,24 @@ def inbound(db: Session, tenant_id: str, phone: str, text: str) -> dict:
     return answer(db, conf, text)
 
 
+def push_fallback(db: Session) -> int:
+    """App notifications without an answer after ``push_fallback_seconds`` are repeated by SMS."""
+    n = 0
+    for conf in db.execute(select(CustomerConfirmation).where(CustomerConfirmation.status == "SENT",
+                                                              CustomerConfirmation.channel == "PUSH",
+                                                              CustomerConfirmation.fallback_at.is_not(None),
+                                                              CustomerConfirmation.fallback_at <= utcnow())).scalars().all():
+        tenant = db.get(Tenant, conf.tenant_id)
+        conf.fallback_at = None
+        conf.channel = "PUSH+SMS"
+        _send_sms(db, tenant, conf)
+        n += 1
+    db.commit()
+    return n
+
+
 def expire(db: Session) -> int:
+    push_fallback(db)
     now = utcnow()
     n = 0
     for conf in db.execute(select(CustomerConfirmation).where(CustomerConfirmation.status == "SENT",

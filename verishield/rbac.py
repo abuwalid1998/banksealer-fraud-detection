@@ -56,6 +56,20 @@ ALL_PERMISSIONS = {
     "reviews.work": "Work on assigned periodic customer reviews",
     "str.prepare": "Prepare suspicious transaction reports (STR) from cases",
     "str.approve": "Approve and record submission of STRs to the FFU",
+    # 1.4
+    "security.manage": "Security posture, vault key and API key rotation",
+    "siem.manage": "Configure forwarding of security events to the SIEM",
+    "ctr.manage": "Review, exempt and record submission of cash transaction reports",
+    "ctr.view": "View cash transaction reports and regulator statistics",
+    "cra.manage": "Run customer risk assessments, override ratings and edit the risk model",
+    "cra.approve": "Approve or reject risk-rating downgrades (four eyes)",
+    "cra.view": "View customer risk assessments",
+    "network.view": "View networks of linked customers and suspected mule accounts",
+    "network.manage": "Recompute network risk scores",
+    "cheques.view": "View cheque activity and returned cheques",
+    "cheques.manage": "Record returned cheques",
+    "cards.manage": "Freeze and unfreeze payment cards",
+    "cards.view": "View card controls",
 }
 
 ROLE_PERMISSIONS: dict[str, set[str]] = {
@@ -63,7 +77,7 @@ ROLE_PERMISSIONS: dict[str, set[str]] = {
         "users.manage", "connectors.manage", "connectors.view", "system.view", "system.summary", "tenant.manage",
         "api_clients.manage", "demo.manage", "audit.view", "models.train", "models.activate", "models.view",
         "tx.view_masked", "customers.view_masked", "decisions.test", "policies.view", "reports.system",
-        "notifications.manage", "mcp.manage", "screening.manage",
+        "notifications.manage", "mcp.manage", "screening.manage", "security.manage", "siem.manage",
     },
     "AML_MANAGER": {
         "system.summary", "models.view", "models.activate", "tx.view_full", "customers.view_full", "decisions.test",
@@ -71,21 +85,25 @@ ROLE_PERMISSIONS: dict[str, set[str]] = {
         "cases.dispose", "policies.view", "policies.edit", "branding.reports", "reports.aml",
         "reports.assigned", "models.clusters", "screening.manage", "screening.view", "watchlist.manage",
         "fraud.report", "confirmations.answer", "reviews.manage", "str.prepare", "str.approve",
+        "ctr.manage", "ctr.view", "cra.manage", "cra.approve", "cra.view", "network.view", "network.manage",
+        "cheques.view", "cheques.manage", "cards.manage", "cards.view",
     },
     "AML_EMPLOYEE": {
         "tx.view_assigned", "customers.view_assigned", "cases.view_assigned", "cases.note", "cases.recommend",
-        "reports.assigned", "fraud.report", "reviews.work", "str.prepare",
+        "reports.assigned", "fraud.report", "reviews.work", "str.prepare", "cra.view", "cards.view",
     },
     "CHIEF_AML": {
         "system.summary", "connectors.view", "models.view", "tx.view_full", "customers.view_full",
         "alerts.view_all", "cases.view_all", "policies.view", "audit.view", "reports.aml", "reports.executive",
-        "reports.assigned", "models.clusters", "screening.view", "str.approve",
+        "reports.assigned", "models.clusters", "screening.view", "str.approve", "ctr.view", "cra.view",
+        "cra.approve", "network.view", "cheques.view", "cards.view",
     },
     # Read-only institution-wide view: everything needed to understand the system, never to change it.
     "CEO": {
         "executive.overview", "system.summary", "connectors.view", "models.view", "models.clusters",
         "tx.view_full", "customers.view_full", "alerts.view_all", "cases.view_all", "policies.view",
-        "reports.board", "reports.executive", "reports.aml", "reports.system", "screening.view",
+        "reports.board", "reports.executive", "reports.aml", "reports.system", "screening.view", "ctr.view",
+        "cra.view", "network.view", "cheques.view",
     },
 }
 
@@ -108,8 +126,10 @@ NAVIGATION = [
     ("alerts", "Alerts", ("alerts.view_all",)),
     ("cases", "AML Cases", ("cases.view_all", "cases.view_assigned")),
     ("screening", "Screening & Watch list", ("screening.manage", "screening.view", "watchlist.manage")),
-    ("reviews", "Customer Reviews", ("reviews.manage", "reviews.work")),
-    ("str", "Regulatory Reports (STR)", ("str.prepare", "str.approve")),
+    ("reviews", "Customer Reviews & Risk", ("reviews.manage", "reviews.work", "cra.manage", "cra.approve")),
+    ("networks", "Networks & Mule Accounts", ("network.view",)),
+    ("cheques", "Cheques", ("cheques.view",)),
+    ("str", "Regulatory Reports", ("str.prepare", "str.approve", "ctr.view", "ctr.manage")),
     ("decision", "Decision Console", ("decisions.test",)),
     ("reports", "Reports", ("reports.system", "reports.aml", "reports.assigned", "reports.executive")),
     ("models", "Models & Segments", ("models.view",)),
@@ -117,7 +137,7 @@ NAVIGATION = [
     ("integrations", "Integrations & Channels", ("connectors.view", "connectors.manage")),
     ("policies", "Policies & Thresholds", ("policies.view",)),
     ("operations", "Operations & Audit", ("system.view", "audit.view")),
-    ("notifications", "E-mail & SMS", ("notifications.manage",)),
+    ("notifications", "E-mail, SMS & Push", ("notifications.manage",)),
     ("agents", "AI Agents (MCP)", ("mcp.manage",)),
     ("settings", "Users & Settings", ("users.manage", "tenant.manage")),
 ]

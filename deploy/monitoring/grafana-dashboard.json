@@ -1,0 +1,295 @@
+{
+ "title": "VeriShield - platform & AML operations",
+ "uid": "verishield-ops",
+ "schemaVersion": 39,
+ "version": 1,
+ "refresh": "30s",
+ "time": {
+  "from": "now-6h",
+  "to": "now"
+ },
+ "tags": [
+  "verishield"
+ ],
+ "templating": {
+  "list": [
+   {
+    "name": "DS",
+    "type": "datasource",
+    "query": "prometheus",
+    "label": "Prometheus"
+   }
+  ]
+ },
+ "panels": [
+  {
+   "id": 1,
+   "title": "Servers alive",
+   "type": "stat",
+   "gridPos": {
+    "x": 0,
+    "y": 0,
+    "w": 4,
+    "h": 4
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "${DS}"
+   },
+   "targets": [
+    {
+     "expr": "max(verishield_cluster_nodes_alive)",
+     "legendFormat": "",
+     "refId": "A"
+    }
+   ]
+  },
+  {
+   "id": 2,
+   "title": "Leader",
+   "type": "stat",
+   "gridPos": {
+    "x": 4,
+    "y": 0,
+    "w": 4,
+    "h": 4
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "${DS}"
+   },
+   "targets": [
+    {
+     "expr": "verishield_cluster_leader == 1",
+     "legendFormat": "{{node}}",
+     "refId": "A"
+    }
+   ]
+  },
+  {
+   "id": 3,
+   "title": "Open incidents",
+   "type": "stat",
+   "gridPos": {
+    "x": 8,
+    "y": 0,
+    "w": 4,
+    "h": 4
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "${DS}"
+   },
+   "targets": [
+    {
+     "expr": "max(verishield_incidents_open)",
+     "legendFormat": "",
+     "refId": "A"
+    }
+   ]
+  },
+  {
+   "id": 4,
+   "title": "Frozen cards",
+   "type": "stat",
+   "gridPos": {
+    "x": 12,
+    "y": 0,
+    "w": 4,
+    "h": 4
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "${DS}"
+   },
+   "targets": [
+    {
+     "expr": "max(verishield_cards_frozen)",
+     "legendFormat": "",
+     "refId": "A"
+    }
+   ]
+  },
+  {
+   "id": 5,
+   "title": "Draft CTRs",
+   "type": "stat",
+   "gridPos": {
+    "x": 16,
+    "y": 0,
+    "w": 4,
+    "h": 4
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "${DS}"
+   },
+   "targets": [
+    {
+     "expr": "max(verishield_ctr_draft)",
+     "legendFormat": "",
+     "refId": "A"
+    }
+   ]
+  },
+  {
+   "id": 6,
+   "title": "SIEM lag",
+   "type": "stat",
+   "gridPos": {
+    "x": 20,
+    "y": 0,
+    "w": 4,
+    "h": 4
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "${DS}"
+   },
+   "targets": [
+    {
+     "expr": "max(verishield_siem_lag_events)",
+     "legendFormat": "",
+     "refId": "A"
+    }
+   ]
+  },
+  {
+   "id": 7,
+   "title": "Decisions (last 5 min)",
+   "type": "timeseries",
+   "gridPos": {
+    "x": 0,
+    "y": 4,
+    "w": 12,
+    "h": 8
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "${DS}"
+   },
+   "targets": [
+    {
+     "expr": "max by (decision) (verishield_decisions_5m{space=\"LIVE\"})",
+     "legendFormat": "{{decision}}",
+     "refId": "A"
+    }
+   ]
+  },
+  {
+   "id": 8,
+   "title": "Decision latency (ms)",
+   "type": "timeseries",
+   "gridPos": {
+    "x": 12,
+    "y": 4,
+    "w": 12,
+    "h": 8
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "${DS}"
+   },
+   "targets": [
+    {
+     "expr": "max by (quantile) (verishield_latency_ms{route=\"decision\"})",
+     "legendFormat": "{{quantile}}",
+     "refId": "A"
+    }
+   ]
+  },
+  {
+   "id": 9,
+   "title": "Open alerts by severity",
+   "type": "timeseries",
+   "gridPos": {
+    "x": 0,
+    "y": 12,
+    "w": 12,
+    "h": 8
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "${DS}"
+   },
+   "targets": [
+    {
+     "expr": "max by (severity) (verishield_alerts_open{space=\"LIVE\"})",
+     "legendFormat": "{{severity}}",
+     "refId": "A"
+    }
+   ]
+  },
+  {
+   "id": 10,
+   "title": "Cases open / overdue",
+   "type": "timeseries",
+   "gridPos": {
+    "x": 12,
+    "y": 12,
+    "w": 12,
+    "h": 8
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "${DS}"
+   },
+   "targets": [
+    {
+     "expr": "max(verishield_cases_open{space=\"LIVE\"})",
+     "legendFormat": "open",
+     "refId": "A"
+    },
+    {
+     "expr": "max(verishield_cases_overdue{space=\"LIVE\"})",
+     "legendFormat": "overdue",
+     "refId": "B"
+    }
+   ]
+  },
+  {
+   "id": 11,
+   "title": "Channels by status",
+   "type": "timeseries",
+   "gridPos": {
+    "x": 0,
+    "y": 20,
+    "w": 12,
+    "h": 8
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "${DS}"
+   },
+   "targets": [
+    {
+     "expr": "max by (status) (verishield_connectors)",
+     "legendFormat": "{{status}}",
+     "refId": "A"
+    }
+   ]
+  },
+  {
+   "id": 12,
+   "title": "Dead letters pending",
+   "type": "timeseries",
+   "gridPos": {
+    "x": 12,
+    "y": 20,
+    "w": 12,
+    "h": 8
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "${DS}"
+   },
+   "targets": [
+    {
+     "expr": "max(verishield_dead_letters_pending)",
+     "legendFormat": "",
+     "refId": "A"
+    }
+   ]
+  }
+ ]
+}

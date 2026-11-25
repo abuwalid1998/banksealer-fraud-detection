@@ -41,7 +41,7 @@ def to_engine(row: Transaction) -> ETx:
 
 
 EXTRA_FIELDS = ("merchant", "mcc", "merchant_cc", "entry_mode", "terminal", "location", "counterparty",
-                "counterparty_cc")
+                "counterparty_cc", "cheque_number", "drawer_bank", "cheque_date")
 
 
 def engine_tx_fields(tx: ETx) -> dict:
@@ -195,9 +195,12 @@ def load_active_models(db: Session) -> None:
         cfg = config_for(policy.document.get("engine_thresholds", {}), mv.tenant_id, tenant.display_name, mv.space,
                          params)
         try:
-            state = ws.state_path(mv.id)
-            path = state if (mv.status == "ACTIVE" and os.path.exists(state)) else mv.artifact_path
-            eng = _load_engine(path, cfg)
+            from . import cluster
+            eng = cluster.load_checkpoint(db, mv, cfg) if mv.status == "ACTIVE" else None
+            if eng is None:
+                state = ws.state_path(mv.id)
+                path = state if (mv.status == "ACTIVE" and os.path.exists(state)) else mv.artifact_path
+                eng = _load_engine(path, cfg)
         except Exception as exc:  # noqa: BLE001
             ws.last_error = f"could not load model {mv.id}: {exc}"
             log.error(ws.last_error)

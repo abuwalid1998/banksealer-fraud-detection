@@ -51,6 +51,8 @@ local:
     cash_withdrawal: {amount: 1.0, terminal: 0.6, location: 1.0, hour: 0.6}
     cash_deposit: {amount: 1.0, terminal: 0.5, location: 0.8, hour: 0.4}
     incoming_transfer: {amount: 1.0, counterparty: 0.8, counterparty_cc: 1.2, hour: 0.3}
+    cheque_deposit: {amount: 1.0, counterparty: 0.9, drawer_bank: 0.6, location: 0.5}
+    cheque_payment: {amount: 1.0, counterparty: 0.8, location: 0.4}
 
 temporal:
   window_hours: 24       # sliding aggregation window

@@ -175,6 +175,11 @@ class Customer:
     remitter: tuple = ()                      # (iban, country, monthly amount)
     clients: list = field(default_factory=list)   # business: paying customers' IBANs
     receipts_rate: float = 0.0
+    cheque_out_rate: float = 0.0              # own cheques presented per day
+    cheque_in_rate: float = 0.0               # cheques deposited per day
+    cheque_mu: float = 0.0
+    cheque_seq: int = 0                       # next number of the customer's cheque book
+    card_ref: str = ""                        # payment card token (masked)
 
     @property
     def daily_rate(self) -> float:
@@ -298,6 +303,16 @@ class TransactionGenerator:
         if business:
             out["clients"] = [ps_iban(r) for _ in range(r.randint(8, 30))]
             out["receipts_rate"] = r.uniform(0.4, 2.0)
+        # cheques (still common in Palestine) and the payment card token
+        if business:
+            out.update(cheque_out_rate=r.uniform(0.15, 0.6), cheque_in_rate=r.uniform(0.2, 0.8),
+                       cheque_mu=r.uniform(7.6, 8.7))
+        else:
+            out.update(cheque_out_rate=r.uniform(0.01, 0.05) if r.random() < 0.35 else 0.0,
+                       cheque_in_rate=r.uniform(0.01, 0.04) if r.random() < 0.3 else 0.0,
+                       cheque_mu=r.uniform(6.8, 8.0))
+        out["cheque_seq"] = 100000 + r.randint(0, 8000) * 100
+        out["card_ref"] = f"CARD-{i:05d}-{r.randint(1000, 9999)}"
         return out
 
     # -------------------------------------------------------------- helpers
@@ -393,14 +408,14 @@ class TransactionGenerator:
             tx.update({"merchant": name, "mcc": mcc, "merchant_cc": cc, "entry_mode": mode,
                        "channel": "card_ecom" if mode == "ECOM" else "card_pos",
                        "device": rng.choice(c.devices) if mode == "ECOM" else "Card terminal",
-                       "amount": round(tx["amount"], 2)})
+                       "amount": round(tx["amount"], 2), "card_ref": c.card_ref})
             out.append(tx)
         for _ in range(self._poisson(c.cash_out_rate * factor)):
             city = c.city if rng.random() < 0.85 else rng.choice(PS_CITIES)
             amount = float(rng.choice([100, 200, 200, 300, 500, 500, 700, 1000, 1500, 2000]))
             tx = self._base(c, self._time(day, c), "cash_withdrawal", amount, self._home_ip(c), None)
             tx.update({"terminal": f"ATM-{ATM_PREFIX.get(city, 'PS')}-{(zlib.crc32((c.user_id + city).encode()) % 20) + 1:03d}",
-                       "location": city, "channel": "atm", "device": "ATM / kiosk"})
+                       "location": city, "channel": "atm", "device": "ATM / kiosk", "card_ref": c.card_ref})
             out.append(tx)
         for _ in range(self._poisson(c.cash_in_rate * factor)):
             tx = self._base(c, day + timedelta(hours=rng.uniform(8.5, 14.5)), "cash_deposit",
@@ -423,6 +438,12 @@ class TransactionGenerator:
                        "purpose": "Family support", "channel": "swift_in", "device": "",
                        "amount": self._round_amount(tx["amount"])})
             out.append(tx)
+        for _ in range(self._poisson(c.cheque_out_rate * factor)):
+            out.append(self._cheque_payment(c, day + timedelta(hours=rng.uniform(8.5, 14.5))))
+        for _ in range(self._poisson(c.cheque_in_rate * factor)):
+            drawer = rng.choice(c.clients) if c.clients and rng.random() < 0.85 else ps_iban(rng)
+            out.append(self._cheque_deposit(c, day + timedelta(hours=rng.uniform(8.5, 14.5)), drawer,
+                                            str(rng.randint(100000, 999999))))
         for _ in range(self._poisson(c.receipts_rate * factor)):
             tx = self._base(c, self._time(day, c), "incoming_transfer",
                             min(rng.lognormvariate(c.amount_mu, c.amount_sigma), 40000.0), self._home_ip(c), None)
@@ -453,8 +474,9 @@ class TransactionGenerator:
     # ------------------------------------------------------------- fraud
     SCENARIOS = ("information_stealing", "transaction_hijacking", "salami_burst", "recharge_fraud", "prepaid_drain")
     SCENARIO_WEIGHTS = (35, 20, 20, 13, 12)
-    PS_SCENARIOS = SCENARIOS + ("card_testing", "atm_cashout", "mule_passthrough", "cash_structuring")
-    PS_WEIGHTS = (24, 14, 14, 8, 6, 12, 8, 9, 5)
+    PS_SCENARIOS = SCENARIOS + ("card_testing", "atm_cashout", "mule_passthrough", "cash_structuring",
+                                "cheque_kiting", "duplicate_cheque", "stolen_chequebook")
+    PS_WEIGHTS = (24, 14, 14, 8, 6, 12, 8, 9, 5, 4, 3, 3)
 
     def _mule_iban(self, country: Optional[str] = None) -> str:
         """Fraud payee: often one of the reused mule accounts, otherwise a fresh account."""
@@ -468,7 +490,8 @@ class TransactionGenerator:
         if scenario is None:
             scenario = rng.choices(self.PS_SCENARIOS, weights=self.PS_WEIGHTS)[0] if c.city else \
                 rng.choices(self.SCENARIOS, weights=self.SCENARIO_WEIGHTS)[0]
-        if scenario in ("card_testing", "atm_cashout", "mule_passthrough", "cash_structuring"):
+        if scenario in ("card_testing", "atm_cashout", "mule_passthrough", "cash_structuring", "cheque_kiting",
+                        "duplicate_cheque", "stolen_chequebook"):
             return self._ps_fraud(c, ts, scenario)
         med = self._median_amount(c)
         out = []
@@ -515,9 +538,75 @@ class TransactionGenerator:
                     tx["purpose"] = rng.choice(["Personal transfer", "Goods purchase", "Investment", "Family support"])
         return out
 
+    def _cheque_payment(self, c: Customer, ts: datetime, number: Optional[int] = None, payee: str = "",
+                        amount: Optional[float] = None, city: str = "", fraud: Optional[str] = None) -> dict:
+        rng = self.rng
+        if number is None:
+            number = c.cheque_seq or 100000
+            c.cheque_seq = number + 1
+        tx = self._base(c, ts, "cheque_payment",
+                        amount if amount is not None else self._round_amount(min(rng.lognormvariate(c.cheque_mu or 7.5, 0.5), 60000.0)),
+                        self._home_ip(c), fraud)
+        tx.update({"counterparty": payee or (rng.choice(c.payee_names) if c.payee_names else rng.choice(PS_COMPANIES)),
+                   "cheque_number": str(number), "cheque_date": (ts - timedelta(days=rng.randint(0, 12))).date().isoformat(),
+                   "location": city or c.city, "channel": "cheque_clearing", "device": "Branch counter",
+                   "purpose": "Cheque payment"})
+        return tx
+
+    def _cheque_deposit(self, c: Customer, ts: datetime, drawer: str, number: str, amount: Optional[float] = None,
+                        city: str = "", fraud: Optional[str] = None, cheque_date: Optional[str] = None) -> dict:
+        rng = self.rng
+        tx = self._base(c, ts, "cheque_deposit",
+                        amount if amount is not None else self._round_amount(min(rng.lognormvariate(c.cheque_mu or 7.5, 0.55), 60000.0)),
+                        self._home_ip(c), fraud)
+        city = city or c.city
+        tx.update({"counterparty": drawer, "drawer_bank": drawer[4:8] if drawer.startswith("PS") else drawer[:4],
+                   "cheque_number": number,
+                   "cheque_date": cheque_date or (ts - timedelta(days=rng.randint(0, 20))).date().isoformat(),
+                   "location": city, "terminal": f"BR-{ATM_PREFIX.get(city, 'PS')}-01", "channel": "branch",
+                   "device": "Branch counter", "purpose": "Cheque deposit"})
+        return tx
+
     def _ps_fraud(self, c: Customer, ts: datetime, scenario: str) -> list[dict]:
         rng = self.rng
         out = []
+        if scenario == "cheque_kiting":         # cheques from new drawers deposited, money taken out before clearing
+            ts = ts.replace(hour=rng.randint(9, 11))
+            total = 0.0
+            for _ in range(rng.randint(2, 3)):
+                amount = round(rng.uniform(6000, 15000), -1)
+                out.append(self._cheque_deposit(c, ts, ps_iban(rng), str(rng.randint(100000, 999999)), amount,
+                                                fraud=scenario))
+                total += amount
+                ts += timedelta(minutes=rng.randint(10, 40))
+            ts += timedelta(hours=rng.uniform(1, 3))
+            cash = round(total * rng.uniform(0.35, 0.5), -1)
+            tx = self._base(c, ts, "cash_withdrawal", cash, self._home_ip(c), scenario)
+            tx.update({"terminal": f"BR-{ATM_PREFIX.get(c.city, 'PS')}-01", "location": c.city, "channel": "branch",
+                       "device": "Branch counter", "card_ref": c.card_ref})
+            out.append(tx)
+            tx = self._base(c, ts + timedelta(minutes=rng.randint(20, 90)), "bank_transfer",
+                            round(total * rng.uniform(0.45, 0.55), 2), self._home_ip(c), scenario)
+            tx["iban"] = self._mule_iban("PS")
+            tx.update({"beneficiary_name": f"{rng.choice(PS_FIRST)} {rng.choice(PS_LAST)}", "purpose": "Personal transfer"})
+            out.append(tx)
+            return out
+        if scenario == "duplicate_cheque":      # the same cheque presented twice (copy / mobile + branch)
+            drawer, number = ps_iban(rng), str(rng.randint(100000, 999999))
+            amount = round(rng.uniform(3000, 12000), -1)
+            out.append(self._cheque_deposit(c, ts, drawer, number, amount, fraud=scenario))
+            other = rng.choice([x for x in ATM_PREFIX if x != c.city])
+            out.append(self._cheque_deposit(c, ts + timedelta(hours=rng.uniform(1, 5)), drawer, number, amount,
+                                            city=other, fraud=scenario))
+            return out
+        if scenario == "stolen_chequebook":     # cheques far outside the customer's sequence, unknown payees
+            start = (c.cheque_seq or 100000) + rng.randint(3000, 9000)
+            city = rng.choice([x for x in ATM_PREFIX if x != c.city])
+            for k in range(rng.randint(2, 3)):
+                out.append(self._cheque_payment(c, ts + timedelta(hours=k), number=start + k,
+                                                payee=f"{rng.choice(PS_FIRST)} {rng.choice(PS_LAST)}",
+                                                amount=round(rng.uniform(5000, 18000), -1), city=city, fraud=scenario))
+            return out
         if scenario == "card_testing":          # stolen card details tested with tiny online payments, then cashed out
             ip = self._foreign_ip()
             name, mcc, cc = rng.choice(FRAUD_MERCHANTS)

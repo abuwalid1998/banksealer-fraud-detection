@@ -11,7 +11,8 @@ import uuid
 from datetime import datetime, timezone
 from typing import Optional
 
-from sqlalchemy import JSON, Boolean, DateTime, Float, ForeignKey, Index, Integer, String, Text, UniqueConstraint
+from sqlalchemy import (JSON, Boolean, DateTime, Float, ForeignKey, Index, Integer, LargeBinary, String, Text,
+                        UniqueConstraint)
 from sqlalchemy.orm import Mapped, mapped_column
 
 from .db import Base
@@ -119,6 +120,10 @@ class ApiClient(Base):
     created_by: Mapped[Optional[str]] = mapped_column(String(36), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     last_used_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    # key rotation: the previous key keeps working until ``previous_expires_at`` (grace period)
+    previous_key_hash: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    previous_expires_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    rotated_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
 
 
 class SecretRecord(Base):
@@ -328,6 +333,7 @@ class Decision(Base):
     explanation: Mapped[str] = mapped_column(Text, default="")
     undertrained: Mapped[bool] = mapped_column(Boolean, default=False)
     peer_group: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    node_id: Mapped[Optional[str]] = mapped_column(String(80), nullable=True)   # cluster node that scored it
     policy_version: Mapped[str] = mapped_column(String(40), default="")
     fraud_model_version: Mapped[str] = mapped_column(String(40), default="")
     shadow: Mapped[dict] = mapped_column(JSON, default=dict)
@@ -652,6 +658,9 @@ class CustomerConfirmation(Base):
     sent_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     answered_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     expires_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    channel: Mapped[str] = mapped_column(String(12), default="SMS")            # SMS | PUSH | PUSH+SMS
+    fallback_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    answered_via: Mapped[str] = mapped_column(String(16), default="")
 
 
 class StrReport(Base):
@@ -737,3 +746,133 @@ class ReportSchedule(Base):
     last_run_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     last_status: Mapped[str] = mapped_column(String(200), default="")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
+# =========================================================================== 1.4
+class ClusterNode(Base):
+    """One VeriShield application server (high availability)."""
+    __tablename__ = "cluster_nodes"
+    node_id: Mapped[str] = mapped_column(String(80), primary_key=True)
+    host: Mapped[str] = mapped_column(String(120), default="")
+    version: Mapped[str] = mapped_column(String(20), default="")
+    role: Mapped[str] = mapped_column(String(10), default="FOLLOWER")          # LEADER | FOLLOWER
+    started_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    last_seen: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    info: Mapped[dict] = mapped_column(JSON, default=dict)
+
+
+class ClusterLease(Base):
+    """Leases held by one node at a time (e.g. ``leader``: channels and background jobs)."""
+    __tablename__ = "cluster_leases"
+    name: Mapped[str] = mapped_column(String(40), primary_key=True)
+    holder: Mapped[str] = mapped_column(String(80), default="")
+    acquired_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    expires_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
+class ModelCheckpoint(Base):
+    """Latest learned state of a fraud model, shared by the nodes of a cluster."""
+    __tablename__ = "model_checkpoints"
+    model_id: Mapped[str] = mapped_column(String(40), primary_key=True)
+    seq: Mapped[int] = mapped_column(Integer, default=0)
+    blob: Mapped[bytes] = mapped_column(LargeBinary)
+    size: Mapped[int] = mapped_column(Integer, default=0)
+    signature: Mapped[str] = mapped_column(String(64), default="")             # HMAC; verified before loading
+    node_id: Mapped[str] = mapped_column(String(80), default="")
+    saved_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
+class CtrReport(Base):
+    """Cash transaction report: a customer's cash in or out above the reporting threshold on one business day."""
+    __tablename__ = "ctr_reports"
+    __table_args__ = (UniqueConstraint("tenant_id", "space", "customer_ref", "business_date", name="uq_ctr"),)
+    id: Mapped[str] = mapped_column(String(40), primary_key=True, default=lambda: new_id("CTR-"))
+    number: Mapped[str] = mapped_column(String(40), default="")
+    tenant_id: Mapped[str] = mapped_column(String(16), index=True)
+    space: Mapped[str] = mapped_column(String(8), default="LIVE")
+    customer_ref: Mapped[str] = mapped_column(String(64), index=True)
+    business_date: Mapped[str] = mapped_column(String(10), index=True)           # YYYY-MM-DD (bank local date)
+    currency: Mapped[str] = mapped_column(String(3), default="")
+    cash_in: Mapped[float] = mapped_column(Float, default=0.0)
+    cash_out: Mapped[float] = mapped_column(Float, default=0.0)
+    tx_refs: Mapped[list] = mapped_column(JSON, default=list)
+    trigger: Mapped[str] = mapped_column(String(40), default="")                  # SINGLE | AGGREGATED
+    status: Mapped[str] = mapped_column(String(14), default="DRAFT")              # DRAFT REVIEWED SUBMITTED EXEMPT
+    exempt_reason: Mapped[str] = mapped_column(String(200), default="")
+    reviewed_by: Mapped[str] = mapped_column(String(120), default="")
+    submitted_ref: Mapped[str] = mapped_column(String(80), default="")
+    submitted_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
+class RiskAssessment(Base):
+    """Customer risk assessment (CRA): weighted factors, resulting rating, overrides and approvals."""
+    __tablename__ = "risk_assessments"
+    id: Mapped[str] = mapped_column(String(40), primary_key=True, default=lambda: new_id("CRA-"))
+    tenant_id: Mapped[str] = mapped_column(String(16), index=True)
+    space: Mapped[str] = mapped_column(String(8), default="LIVE")
+    customer_ref: Mapped[str] = mapped_column(String(64), index=True)
+    score: Mapped[float] = mapped_column(Float, default=0.0)
+    level: Mapped[str] = mapped_column(String(8), default="LOW")
+    previous_level: Mapped[str] = mapped_column(String(8), default="")
+    factors: Mapped[list] = mapped_column(JSON, default=list)
+    method: Mapped[str] = mapped_column(String(12), default="AUTO")               # AUTO | ONBOARDING | OVERRIDE
+    status: Mapped[str] = mapped_column(String(18), default="APPLIED")            # APPLIED PENDING_APPROVAL REJECTED
+    reason: Mapped[str] = mapped_column(String(400), default="")
+    requested_by: Mapped[str] = mapped_column(String(120), default="")
+    approved_by: Mapped[str] = mapped_column(String(120), default="")
+    model_version: Mapped[str] = mapped_column(String(20), default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)
+
+
+class ChequeReturn(Base):
+    """A cheque returned unpaid (insufficient funds, signature, stopped, account closed...)."""
+    __tablename__ = "cheque_returns"
+    id: Mapped[str] = mapped_column(String(40), primary_key=True, default=lambda: new_id("CHQ-"))
+    tenant_id: Mapped[str] = mapped_column(String(16), index=True)
+    space: Mapped[str] = mapped_column(String(8), default="LIVE")
+    tx_ref: Mapped[str] = mapped_column(String(80), default="", index=True)
+    customer_ref: Mapped[str] = mapped_column(String(64), default="", index=True)  # our customer involved
+    role: Mapped[str] = mapped_column(String(10), default="DRAWER")             # DRAWER (issued it) | DEPOSITOR
+    drawer_account: Mapped[str] = mapped_column(String(64), default="", index=True)
+    cheque_number: Mapped[str] = mapped_column(String(20), default="")
+    amount: Mapped[float] = mapped_column(Float, default=0.0)
+    reason: Mapped[str] = mapped_column(String(40), default="")
+    returned_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
+class NetworkScore(Base):
+    """Network risk of a customer: ring membership and risk propagated from confirmed fraud."""
+    __tablename__ = "network_scores"
+    __table_args__ = (UniqueConstraint("tenant_id", "space", "customer_ref", name="uq_network_score"),)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    tenant_id: Mapped[str] = mapped_column(String(16), index=True)
+    space: Mapped[str] = mapped_column(String(8), default="LIVE")
+    customer_ref: Mapped[str] = mapped_column(String(64), index=True)
+    score: Mapped[float] = mapped_column(Float, default=0.0)
+    ring_id: Mapped[str] = mapped_column(String(40), default="", index=True)
+    ring_size: Mapped[int] = mapped_column(Integer, default=1)
+    hops_to_fraud: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    reasons: Mapped[list] = mapped_column(JSON, default=list)
+    computed_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
+class CardControl(Base):
+    """Card freeze / unfreeze requested by the customer app, the AML team or an automatic rule."""
+    __tablename__ = "card_controls"
+    id: Mapped[str] = mapped_column(String(40), primary_key=True, default=lambda: new_id("CRD-"))
+    tenant_id: Mapped[str] = mapped_column(String(16), index=True)
+    space: Mapped[str] = mapped_column(String(8), default="LIVE")
+    card_ref: Mapped[str] = mapped_column(String(64), index=True)
+    customer_ref: Mapped[str] = mapped_column(String(64), index=True)
+    status: Mapped[str] = mapped_column(String(10), default="FROZEN")             # FROZEN | ACTIVE
+    reason: Mapped[str] = mapped_column(String(300), default="")
+    source: Mapped[str] = mapped_column(String(16), default="AML")                # CUSTOMER_APP | AML | AUTO
+    tx_ref: Mapped[str] = mapped_column(String(80), default="")
+    case_id: Mapped[str] = mapped_column(String(40), default="")
+    command_status: Mapped[str] = mapped_column(String(12), default="")           # SENT ACKED FAILED SIMULATED
+    command_detail: Mapped[str] = mapped_column(String(300), default="")
+    frozen_by: Mapped[str] = mapped_column(String(120), default="")
+    frozen_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    unfrozen_by: Mapped[str] = mapped_column(String(120), default="")
+    unfrozen_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)

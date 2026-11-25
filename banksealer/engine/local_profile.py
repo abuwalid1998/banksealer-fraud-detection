@@ -37,6 +37,10 @@ FEATURES: dict[str, list[tuple[str, str]]] = {
                      ("hour", "hour")],
     "incoming_transfer": [("amount", "numeric"), ("counterparty", "categorical"), ("counterparty_cc", "categorical"),
                           ("hour", "hour")],
+    # cheques: drawer account / bank for deposits, payee for the customer's own cheques
+    "cheque_deposit": [("amount", "numeric"), ("counterparty", "categorical"), ("drawer_bank", "categorical"),
+                       ("location", "categorical")],
+    "cheque_payment": [("amount", "numeric"), ("counterparty", "categorical"), ("location", "categorical")],
 }
 FEATURE_LABELS = {
     "amount": "Amount", "iban": "Beneficiary IBAN", "iban_cc": "Beneficiary country",
@@ -44,11 +48,14 @@ FEATURE_LABELS = {
     "phone_number": "Recharged phone number", "operator": "Phone operator", "card_id": "Prepaid card",
     "merchant": "Merchant", "mcc": "Merchant category", "merchant_cc": "Merchant country", "entry_mode": "Card entry mode",
     "terminal": "Terminal (ATM / branch)", "location": "Terminal location", "counterparty": "Originator account",
-    "counterparty_cc": "Originator country",
+    "counterparty_cc": "Originator country", "drawer_bank": "Drawer's bank",
 }
+TYPE_LABELS = {("cheque_deposit", "counterparty"): "Drawer account", ("cheque_payment", "counterparty"): "Cheque payee",
+               ("cheque_deposit", "location"): "Branch", ("cheque_payment", "location"): "Presenting branch"}
 TYPE_NOUN = {"bank_transfer": "transfers", "phone_recharge": "phone recharges", "prepaid_card": "prepaid-card top-ups",
              "card_payment": "card payments", "cash_withdrawal": "cash withdrawals", "cash_deposit": "cash deposits",
-             "incoming_transfer": "incoming transfers"}
+             "incoming_transfer": "incoming transfers", "cheque_deposit": "cheque deposits",
+             "cheque_payment": "cheques issued"}
 
 
 def mask(value: Optional[str]) -> str:
@@ -205,7 +212,7 @@ class LocalProfiler:
     # ------------------------------------------------------- explanations
     def _reason(self, tx: Transaction, name: str, kind: str, term: float,
                 prof: Optional[TypeProfile], undertrained: bool) -> Reason:
-        label = FEATURE_LABELS.get(name, name)
+        label = TYPE_LABELS.get((tx.tx_type, name)) or FEATURE_LABELS.get(name, name)
         noun = TYPE_NOUN[tx.tx_type]
         n = prof.n if prof else 0
         suffix = " (few past operations: compared with similar customers)" if undertrained else ""

@@ -38,6 +38,8 @@ DEFAULTS = {
             "auth_prefix": "Bearer", "token_ref": None,
             "body_template": '{"to": "{to}", "from": "{sender}", "text": "{text}"}',
             "success_contains": "", "timeout": 15, "verify_tls": True, "country_code": "+970"},
+    # bank's mobile-app backend: VeriShield posts a signed JSON request, the app shows it to the customer
+    "push": {"enabled": False, "url": "", "secret_ref": None, "timeout": 10, "verify_tls": True},
     "events": {"password_reset": True, "account_created": True, "case_assigned": True, "critical_alert": True},
 }
 SECURITY = ("STARTTLS", "SSL", "NONE")
@@ -63,11 +65,50 @@ def config(tenant: Tenant) -> dict:
 
 def public_config(tenant: Tenant) -> dict:
     cfg = config(tenant)
-    for section, key in (("email", "password_ref"), ("sms", "token_ref")):
+    for section, key in (("email", "password_ref"), ("sms", "token_ref"), ("push", "secret_ref")):
         cfg[section]["secret_configured"] = bool(cfg[section].pop(key, None))
     cfg["email"]["ready"] = email_ready(tenant)
     cfg["sms"]["ready"] = sms_ready(tenant)
+    cfg["push"]["ready"] = push_ready(tenant)
     return cfg
+
+
+def push_ready(tenant: Tenant) -> bool:
+    p = config(tenant)["push"]
+    return bool(p["enabled"] and p["url"])
+
+
+def send_push(db: Session, tenant: Tenant, payload: dict, event: str = "customer_confirmation") -> tuple[bool, str]:
+    """POST a signed JSON message to the bank's mobile-app backend (HMAC-SHA256 of timestamp + body)."""
+    import hashlib
+    import hmac
+    import ssl
+    import time as _time
+    from ..security import check_url
+    p = config(tenant)["push"]
+    recipient = str(payload.get("customer_id") or "")
+    if not push_ready(tenant):
+        return False, "mobile push is not configured"
+    body = json.dumps(payload, separators=(",", ":")).encode()
+    ts = str(int(_time.time()))
+    secret = _secret(db, tenant.id, p.get("secret_ref"))
+    headers = {"Content-Type": "application/json", "X-VeriShield-Timestamp": ts,
+               "X-VeriShield-Signature": "sha256=" + hmac.new(secret.encode(), ts.encode() + b"." + body,
+                                                              hashlib.sha256).hexdigest()}
+    ctx = ssl.create_default_context()
+    if not p.get("verify_tls", True):
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+    try:
+        req = urllib.request.Request(check_url(p["url"]), data=body, headers=headers, method="POST")
+        with urllib.request.urlopen(req, timeout=float(p.get("timeout") or 10), context=ctx) as resp:  # nosec B310
+            ok = 200 <= resp.status < 300
+            detail = f"HTTP {resp.status}"
+    except Exception as exc:  # noqa: BLE001
+        ok, detail = False, f"{type(exc).__name__}: {exc}"
+    _record(db, tenant.id, "PUSH", recipient, "", str(payload.get("message", ""))[:300], "SENT" if ok else "FAILED",
+            "" if ok else detail, event)
+    return ok, detail
 
 
 def email_ready(tenant: Tenant) -> bool:
@@ -200,7 +241,9 @@ def _sms_send(db: Session, tenant: Tenant, to: str, text: str) -> str:
     if not s.get("verify_tls", True):
         ctx.check_hostname = False
         ctx.verify_mode = ssl.CERT_NONE
-    req = urllib.request.Request(url, data=data, headers=headers, method="GET" if method == "GET" else "POST")
+    from ..security import check_url
+    req = urllib.request.Request(check_url(url), data=data, headers=headers,
+                                 method="GET" if method == "GET" else "POST")
     with urllib.request.urlopen(req, timeout=float(s.get("timeout") or 15), context=ctx) as resp:  # noqa: S310
         payload = resp.read(4000).decode("utf-8", "replace")
         if resp.status >= 300:

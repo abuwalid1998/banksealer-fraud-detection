@@ -47,7 +47,11 @@ FIELD_ALIASES: dict[str, tuple[str, ...]] = {
     "entry_mode": ("entry_mode", "pos_entry_mode", "card_entry_mode"),
     "terminal": ("terminal", "terminal_id", "atm_id", "atm"),
     "location": ("location", "terminal_location", "atm_location"),
-    "counterparty": ("counterparty", "originator", "originator_iban", "sender_iban", "remitter_iban", "from_iban"),
+    "counterparty": ("counterparty", "originator", "originator_iban", "sender_iban", "remitter_iban", "from_iban",
+                     "drawer_account", "drawer_iban", "payee", "payee_account"),
+    "cheque_number": ("cheque_number", "cheque_no", "check_number", "cheque_serial", "serial_number"),
+    "drawer_bank": ("drawer_bank", "drawer_bank_code", "issuing_bank", "paying_bank"),
+    "cheque_date": ("cheque_date", "check_date", "date_on_cheque", "instrument_date"),
     "counterparty_cc": ("counterparty_cc", "originator_country", "sender_country"),
 }
 TYPE_ALIASES = {
@@ -66,6 +70,10 @@ TYPE_ALIASES = {
     "cash_deposit": "cash_deposit", "deposit": "cash_deposit", "cd": "cash_deposit",
     "incoming_transfer": "incoming_transfer", "incoming": "incoming_transfer", "credit_transfer": "incoming_transfer",
     "inward_transfer": "incoming_transfer", "received_transfer": "incoming_transfer", "it": "incoming_transfer",
+    "cheque_deposit": "cheque_deposit", "cheque_in": "cheque_deposit", "check_deposit": "cheque_deposit",
+    "cheque_lodgement": "cheque_deposit", "chq_dep": "cheque_deposit",
+    "cheque_payment": "cheque_payment", "cheque_out": "cheque_payment", "cheque_issued": "cheque_payment",
+    "cheque_clearing": "cheque_payment", "check_payment": "cheque_payment", "chq_pay": "cheque_payment",
 }
 TIME_FORMATS = (
     "%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M", "%d/%m/%Y %H:%M:%S",
@@ -225,12 +233,18 @@ class TransactionPreparer:
         merchant = _clean(data.get("merchant"))
         if tx_type == "card_payment" and not merchant:
             raise PreparationError("card payment without merchant")
-        counterparty = normalise_iban(data.get("counterparty"))
+        counterparty = (_clean(data.get("counterparty")) if tx_type == "cheque_payment"
+                        else normalise_iban(data.get("counterparty")))
         counterparty_cc = _clean(data.get("counterparty_cc"))
         if counterparty and not counterparty_cc and re.match(r"^[A-Z]{2}\d{2}", counterparty):
             counterparty_cc = counterparty[:2]
         if tx_type == "incoming_transfer" and not counterparty:
             raise PreparationError("incoming transfer without originator (counterparty)")
+        cheque_number = _clean(data.get("cheque_number"))
+        if tx_type in ("cheque_deposit", "cheque_payment") and not cheque_number:
+            raise PreparationError("cheque without cheque number")
+        if tx_type == "cheque_deposit" and not counterparty:
+            raise PreparationError("cheque deposit without drawer account (counterparty)")
 
         cc_asn = _clean(data.get("cc_asn"))
         cc_asn = cc_asn.upper() if cc_asn else ("UNKNOWN" if _clean(data.get("ip")) is None else "XX-AS0")
@@ -244,7 +258,8 @@ class TransactionPreparer:
         user_id = str(data["user_id"]).strip()
         tx_id = _clean(data.get("tx_id"))
         if not tx_id:
-            digest = hashlib.sha1(f"{user_id}|{timestamp.isoformat()}|{amount}|{tx_type}|{iban}".encode()).hexdigest()
+            digest = hashlib.sha1(f"{user_id}|{timestamp.isoformat()}|{amount}|{tx_type}|{iban}".encode(),
+                                  usedforsecurity=False).hexdigest()
             tx_id = f"TX-{digest[:16]}"
 
         return Transaction(
@@ -274,4 +289,7 @@ class TransactionPreparer:
             location=_clean(data.get("location")),
             counterparty=counterparty,
             counterparty_cc=counterparty_cc.upper() if counterparty_cc else None,
+            cheque_number=cheque_number,
+            drawer_bank=_clean(data.get("drawer_bank")),
+            cheque_date=_clean(data.get("cheque_date")),
         )

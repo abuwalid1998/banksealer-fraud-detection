@@ -22,7 +22,8 @@ from mock_channel.generator import PS_CITIES, PS_COMPANIES, PS_FIRST, PS_LAST, T
 
 from .. import audit
 from ..deps import Principal
-from ..models import (Alert, ApiClient, Case, CaseEntityLink, CaseEvent, CaseNote, Connector, Customer,
+from ..models import (Alert, ApiClient, CardControl, Case, CaseEntityLink, CaseEvent, CaseNote, ChequeReturn,
+                      Connector, CtrReport, Customer, NetworkScore, RiskAssessment,
                       CustomerConfirmation, CustomerReview, CustomerSegment, DeadLetterEvent, Decision,
                       EvidenceReference, ExecutionStatusEvent, LoginEvent, ModelVersion, ReportJob, ReportSchedule,
                       ScreeningMatch, StrReport, Tenant, Transaction, User, WatchlistEntry, utcnow)
@@ -48,6 +49,9 @@ SCENARIOS = {
     "atm_cashout": "Cloned card emptied at ATMs in other cities at night",
     "mule_passthrough": "Mule account: several unknown senders, money sent abroad within hours",
     "cash_structuring": "Several cash deposits just below 10,000 the same day",
+    "cheque_kiting": "Cheques from new drawers deposited, cash and transfers out before they clear (kiting)",
+    "duplicate_cheque": "The same cheque deposited twice at two branches",
+    "stolen_chequebook": "Cheques far outside the customer's cheque book sequence to unknown payees",
 }
 FIRST = ("Rami", "Lina", "Omar", "Dana", "Sami", "Hala", "Yousef", "Maya", "Karim", "Nour", "Tariq", "Reem", "Fadi",
          "Salma", "Ziad", "Aya", "Hani", "Rana", "Majd", "Leen")
@@ -55,8 +59,10 @@ LAST = ("Haddad", "Khoury", "Nasser", "Saleh", "Odeh", "Barakat", "Hamdan", "Dar
         "Jaber", "Shami", "Halabi", "Yasin", "Rabah")
 BUSINESS = ("Trading Co.", "Construction Ltd.", "Pharma Supplies", "Tech Services", "Import & Export", "Foods Ltd.",
             "Logistics", "Stone & Marble")
-ACTIVITIES_IND = ("Salaried employee", "Self-employed", "Public sector employee", "Retired", "Student")
-ACTIVITIES_BUS = ("Wholesale trade", "Construction", "Retail", "IT services", "Import/export", "Manufacturing")
+ACTIVITIES_IND = ("Salaried employee", "Self-employed", "Public sector employee", "Retired", "Student",
+                  "Salaried employee", "Jewellery trader")
+ACTIVITIES_BUS = ("Wholesale trade", "Construction", "Retail", "IT services", "Import/export", "Manufacturing",
+                  "Money exchange", "Real estate", "Retail", "Jewellery & gold")
 CHANNELS = ("mobile_banking", "mobile_banking", "internet_banking", "internet_banking", "branch", "atm_kiosk")
 
 _gens: dict[str, TransactionGenerator] = {}
@@ -101,6 +107,8 @@ def _customer_row(tenant: Tenant, c, rng: random.Random) -> Customer:
         turnover += c.cash_in_rate * 30 * 2.718281828 ** (c.cash_in_mu + 0.125)
     if c.receipts_rate:
         turnover += c.receipts_rate * 30 * mean_amount
+    if c.cheque_in_rate or c.cheque_out_rate:
+        turnover += (c.cheque_in_rate + c.cheque_out_rate) * 30 * 2.718281828 ** (c.cheque_mu + 0.14)
     products = ["current_account", "mobile_banking"]
     if c.prepaid_rate:
         products.append("prepaid_card")
@@ -108,6 +116,10 @@ def _customer_row(tenant: Tenant, c, rng: random.Random) -> Customer:
         products += ["business_account", "pos_acquiring"][: rng.randint(1, 2)]
     if c.segment == "affluent":
         products.append("savings_account")
+    if c.cheque_out_rate:
+        products.append("cheque_book")
+    if c.payees and any(not p.startswith("PS") for p in c.payees):
+        products.append("foreign_transfer")
     risk = rng.choices(["LOW", "MEDIUM", "HIGH"], weights=[78, 17, 5])[0]
     return Customer(tenant_id=tenant.id, space="DEMO", customer_ref=c.user_id, display_name=name,
                     customer_type="BUSINESS" if business else "INDIVIDUAL",
@@ -121,7 +133,11 @@ def _customer_row(tenant: Tenant, c, rng: random.Random) -> Customer:
                     attributes={"synthetic": True, "persona_segment": c.segment, "city": c.city or "",
                                 "home_branch": f"{c.city} branch" if c.city else "",
                                 "phone": c.phones[0] if c.phones else "",
-                                "national_id": f"4{int(c.user_id[1:]) * 7919 % 10 ** 8:08d}"})
+                                "national_id": f"4{int(c.user_id[1:]) * 7919 % 10 ** 8:08d}",
+                                # deterministic extra KYC facts used by the customer risk assessment
+                                "onboarding_channel": "digital" if int(c.user_id[1:]) % 6 == 0 else "branch",
+                                **({"nationality": "JO"} if int(c.user_id[1:]) % 29 == 0 else {}),
+                                **({"card_ref": c.card_ref} if c.card_ref else {})})
 
 
 def seed(db: Session, tenant_id: str, actor: str = "system", with_cases: bool = False) -> dict:
@@ -176,10 +192,16 @@ def seed(db: Session, tenant_id: str, actor: str = "system", with_cases: bool = 
             db.commit()
     db.commit()
 
-    from . import operations, screening
+    from . import cra, ctr, network, operations, screening
+    _seed_cheque_returns(db, tenant, rng)
     screening.seed_demo(db, tenant.id)
     screening.screen_customers(db, tenant.id, "DEMO")
+    network.compute(db, tenant.id, "DEMO")
+    cra.initialise(db, tenant, "DEMO")
     operations.schedule_reviews(db, tenant.id, "DEMO")
+    today = local_today(tz).date() if tz is not None else utcnow().date()
+    for k in range(1, 15):
+        ctr.generate(db, tenant, "DEMO", today - timedelta(days=k), actor)
 
     seg = segmentation.build_segmentation(db, tenant.id, "DEMO", actor)
     segmentation.activate_segmentation(db, seg.id, actor)
@@ -349,7 +371,8 @@ def _scenario_records(gen: TransactionGenerator, scenario: str, persona, rng: ra
             for r in recs:
                 r["amount"] = max(r["amount"], 6000.0)
         return recs
-    if scenario in ("card_testing", "atm_cashout", "mule_passthrough", "cash_structuring"):
+    if scenario in ("card_testing", "atm_cashout", "mule_passthrough", "cash_structuring", "cheque_kiting",
+                    "duplicate_cheque", "stolen_chequebook"):
         return gen._ps_fraud(persona, at, scenario)
     if scenario == "structuring":
         recs = []
@@ -406,6 +429,36 @@ def inject(db: Session, tenant_id: str, scenario: str, customer_ref: Optional[st
     return out
 
 
+def _seed_cheque_returns(db: Session, tenant: Tenant, rng: random.Random) -> int:
+    """Returned cheques in the history: a few drawers bounce repeatedly, a few customers bounce their own cheques."""
+    rows = db.execute(select(Transaction.tx_ref, Transaction.customer_ref, Transaction.tx_type, Transaction.beneficiary,
+                             Transaction.amount, Transaction.ts, Transaction.details).where(
+        Transaction.tenant_id == tenant.id, Transaction.space == "DEMO",
+        Transaction.tx_type.in_(("cheque_deposit", "cheque_payment")))).all()
+    drawers = sorted({r.beneficiary for r in rows if r.tx_type == "cheque_deposit" and r.beneficiary})
+    bad = set(rng.sample(drawers, k=max(1, len(drawers) // 40))) if drawers else set()
+    bouncers = {r.customer_ref for r in rows if r.tx_type == "cheque_payment" and rng.random() < 0.01}
+    n = 0
+    for r in rows:
+        if r.tx_type == "cheque_deposit":
+            p = 0.55 if r.beneficiary in bad else 0.01
+            role, drawer, cust = "DEPOSITOR", r.beneficiary or "", r.customer_ref
+        else:
+            p = 0.35 if r.customer_ref in bouncers else 0.003
+            role, drawer, cust = "DRAWER", r.customer_ref, r.customer_ref
+        if rng.random() >= p:
+            continue
+        db.add(ChequeReturn(tenant_id=tenant.id, space="DEMO", tx_ref=r.tx_ref, customer_ref=cust, role=role,
+                            drawer_account=drawer, cheque_number=str((r.details or {}).get("cheque_number") or ""),
+                            amount=float(r.amount),
+                            reason=rng.choices(["INSUFFICIENT_FUNDS", "SIGNATURE", "STOPPED", "ACCOUNT_CLOSED"],
+                                               weights=[80, 8, 7, 5])[0],
+                            returned_at=r.ts + timedelta(days=rng.randint(1, 3))))
+        n += 1
+    db.commit()
+    return n
+
+
 def _tz(tenant: Tenant):
     try:
         from zoneinfo import ZoneInfo
@@ -451,6 +504,7 @@ class GatewaySimulator:
         start_utc = max(start or datetime.min, local_to_utc(day0, self.tz))
         self.gen = TransactionGenerator(p["customers"], banks={tenant_id: "PS"}, seed=p["seed"],
                                         fraud_ratio=fraud_ratio, currency=currency, start=day0)
+        self._continue_cheque_books(tenant_id)
         self.stream = self.gen.live(fraud_ratio)
         self.speed = max(1.0, float(speed))
         self.allow_future = allow_future
@@ -462,6 +516,23 @@ class GatewaySimulator:
         self._last_ts: Optional[datetime] = None
         self._last_release = self.wall_start
         self.queue: list[dict] = []
+
+    def _continue_cheque_books(self, tenant_id: str) -> None:
+        """Cheque numbers continue after the last cheque each customer wrote (books do not restart)."""
+        from ..db import SessionLocal
+        last: dict[str, int] = {}
+        with SessionLocal() as db:
+            for ref, d in db.execute(select(Transaction.customer_ref, Transaction.details).where(
+                    Transaction.tenant_id == tenant_id, Transaction.space == "DEMO",
+                    Transaction.tx_type == "cheque_payment")).all():
+                try:
+                    n = int((d or {}).get("cheque_number") or 0)
+                except ValueError:
+                    continue
+                last[ref] = max(last.get(ref, 0), n)
+        for c in self.gen.customers:
+            if c.user_id in last:
+                c.cheque_seq = last[c.user_id] + 1
 
     def _logins_for(self, record: dict) -> list[dict]:
         """Digital-banking session events that precede a payment (account-takeover signals for fraud)."""
@@ -554,7 +625,8 @@ def reset(db: Session, tenant_id: str, actor, reseed: bool = True) -> dict:
             db.execute(delete(model).where(model.case_id.in_(case_ids)))
     for model in (Case, Alert, ExecutionStatusEvent, Decision, Transaction, Customer, CustomerSegment, ModelVersion,
                   DeadLetterEvent, ReportJob, Connector, ApiClient, ScreeningMatch, WatchlistEntry,
-                  CustomerConfirmation, StrReport, LoginEvent, CustomerReview, ReportSchedule):
+                  CustomerConfirmation, StrReport, LoginEvent, CustomerReview, ReportSchedule, CtrReport,
+                  RiskAssessment, ChequeReturn, NetworkScore, CardControl):
         res = db.execute(delete(model).where(model.tenant_id == tenant_id, model.space == "DEMO"))
         counts[model.__tablename__] = res.rowcount
     db.commit()

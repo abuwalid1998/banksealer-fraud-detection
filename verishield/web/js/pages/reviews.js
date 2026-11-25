@@ -1,8 +1,23 @@
 // Periodic customer (KYC / risk) reviews: scheduled by institution risk rating, assigned, worked and completed.
 import { api } from "../api.js";
-import { S, busy, card, chip, errToast, esc, fmtDate, fmtNum, fmtRel, kpi, loading, modal, options, table, toast } from "../ui.js";
+import { S, busy, card, chip, errToast, esc, fmtDate, fmtNum, fmtRel, kpi, label, loading, modal, options, table, toast } from "../ui.js";
 
-export async function render(el) {
+const can = (p) => S.me.permissions.includes(p);
+
+export async function render(el, { params = {} } = {}) {
+  const tabs = [];
+  if (can("reviews.manage") || can("reviews.work")) tabs.push(["reviews", "Periodic reviews"]);
+  if (can("cra.manage") || can("cra.approve") || can("cra.view")) tabs.push(["ratings", "Risk rating changes"], ["model", "Customer risk model"]);
+  let cur = params.tab || tabs[0][0];
+  const draw = () => {
+    el.innerHTML = `<div class="tabs">${tabs.map(([k, l]) => `<button class="${k === cur ? "on" : ""}" data-t="${k}">${l}</button>`).join("")}</div><div id="tab">${loading()}</div>`;
+    el.querySelectorAll("[data-t]").forEach((b) => (b.onclick = () => { cur = b.dataset.t; draw(); }));
+    ({ reviews: reviewsTab, ratings: ratingsTab, model: modelTab })[cur](el.querySelector("#tab")).catch(errToast);
+  };
+  draw();
+}
+
+async function reviewsTab(el) {
   let status = "OPEN";
   const draw = async () => {
     el.innerHTML = loading();
@@ -45,4 +60,55 @@ async function work(r, done) {
       } }] });
   if (res) { toast("Saved"); done(); }
 }
-export { S };
+
+
+// ------------------------------------------------------------------ customer risk assessment
+const TONE = { LOW: "ok", MEDIUM: "warn", HIGH: "crit" };
+
+async function ratingsTab(box, status = "") {
+  const d = await api.get(`/risk-assessments${status ? `?status=${status}` : ""}`);
+  const dist = d.distribution || {};
+  const total = Object.values(dist).reduce((a, b) => a + b, 0) || 1;
+  box.innerHTML = `<div class="kpis">${["LOW", "MEDIUM", "HIGH"].map((l) => kpi(`${l.toLowerCase()} risk customers`, fmtNum(dist[l] || 0), `${((100 * (dist[l] || 0)) / total).toFixed(1)}%`, l === "HIGH" ? "crit" : "")).join("")}
+      ${kpi("Awaiting approval", fmtNum(d.pending), "downgrades need a second person", d.pending ? "warn" : "")}</div>
+    <div style="margin-top:16px">${card("Rating changes", table([
+      { label: "When", render: (r) => fmtDate(r.created_at) },
+      { label: "Customer", render: (r) => `<a href="#/customers/${encodeURIComponent(r.customer_ref)}">${esc(r.customer_ref)}</a><div class="tiny muted">${esc(r.customer_name)}</div>` },
+      { label: "Change", render: (r) => `${chip(r.previous_level || "–", TONE[r.previous_level] || "neutral")} → ${chip(r.level, TONE[r.level])}` },
+      { label: "Score", num: true, render: (r) => r.score }, { label: "Method", render: (r) => chip(r.method, "neutral") },
+      { label: "Reason", render: (r) => `<span class="small">${esc(r.reason)}</span><div class="tiny muted">${esc(r.requested_by)}${r.approved_by ? ` · approved ${esc(r.approved_by)}` : ""}</div>` },
+      { label: "Status", render: (r) => chip(r.status) },
+      { label: "", render: (r) => r.status === "PENDING_APPROVAL" && d.can_approve ? `<div class="row nowrap"><button class="btn sm primary" data-a="approve" data-id="${r.id}">Approve</button><button class="btn sm" data-a="reject" data-id="${r.id}">Reject</button></div>` : "" },
+    ], d.assessments, { empty: "No rating changes." }), { flush: true,
+      sub: "Customers are re-assessed daily. Upgrades apply at once (and open a KYC review when a customer becomes HIGH); downgrades wait for approval by a second person.",
+      actions: `<select class="input" id="st" style="width:auto">${options([["", "All changes"], ["PENDING_APPROVAL", "Awaiting approval"], ["APPLIED", "Applied"], ["REJECTED", "Rejected"]], status)}</select>${d.can_manage ? '<button class="btn sm" id="runall">Re-assess all customers</button>' : ""}` })}</div>`;
+  box.querySelector("#st").onchange = (e) => ratingsTab(box, e.target.value);
+  const run = box.querySelector("#runall");
+  if (run) run.onclick = () => busy(run, async () => { try { const r = await api.post("/risk-assessments/run-all"); toast(`${r.assessed} assessed · ${r.upgraded} upgraded · ${r.pending_downgrades} downgrade(s) to approve`); ratingsTab(box, status); } catch (e) { errToast(e); } });
+  box.querySelectorAll("[data-a]").forEach((b) => (b.onclick = () => busy(b, async () => {
+    try { await api.post(`/risk-assessments/${b.dataset.id}/${b.dataset.a}`); toast(b.dataset.a === "approve" ? "Approved" : "Rejected"); ratingsTab(box, status); } catch (e) { errToast(e); }
+  })));
+}
+
+async function modelTab(box) {
+  const d = await api.get("/cra/model");
+  const m = d.model;
+  const ro = d.can_manage ? "" : "disabled";
+  box.innerHTML = `<form id="cm">${card("Customer risk assessment model", `
+      <div class="grid g2"><div><h4 style="margin-bottom:8px">Factor weights</h4>${Object.entries(m.weights).map(([k, v]) => `<label class="f" style="flex-direction:row;align-items:center;justify-content:space-between;margin-bottom:6px">${esc(label(k))}<input class="input" type="number" min="0" max="100" step="1" data-w="${k}" value="${v}" style="width:90px" ${ro}></label>`).join("")}</div>
+      <div><h4 style="margin-bottom:8px">Rating thresholds (score 0-100)</h4>
+        <label class="f">MEDIUM from<input class="input" type="number" name="MEDIUM" value="${m.thresholds.MEDIUM}" ${ro}></label>
+        <label class="f">HIGH from<input class="input" type="number" name="HIGH" value="${m.thresholds.HIGH}" ${ro}></label>
+        <label class="check" style="margin-top:10px"><input type="checkbox" name="auto_downgrade" ${m.auto_downgrade ? "checked" : ""} ${ro}> Apply automatic downgrades without approval</label>
+        <h4 style="margin:14px 0 6px">Minimum level</h4><p class="small">${Object.entries(m.minimum_level).map(([k, v]) => `${esc(label(k))} → <b>${esc(v)}</b>`).join("<br>")}</p>
+        <h4 style="margin:14px 0 6px">High-risk activities</h4><p class="tiny muted">${esc(m.occupation_risk.high.join(", "))}</p></div></div>`,
+    { sub: `Model ${esc(m.version)}. Changes are audited and apply to the next assessment.`, actions: d.can_manage ? '<button class="btn sm primary">Save</button>' : "" })}</form>`;
+  const f = box.querySelector("#cm");
+  f.onsubmit = (e) => { e.preventDefault(); busy(f.querySelector("button.primary"), async () => {
+    try {
+      const weights = {}; f.querySelectorAll("[data-w]").forEach((i) => (weights[i.dataset.w] = Number(i.value)));
+      await api.put("/cra/model", { weights, thresholds: { MEDIUM: Number(f.querySelector("[name=MEDIUM]").value), HIGH: Number(f.querySelector("[name=HIGH]").value) },
+        auto_downgrade: f.querySelector("[name=auto_downgrade]").checked });
+      toast("Risk model saved"); modelTab(box);
+    } catch (err) { errToast(err); } }); };
+}

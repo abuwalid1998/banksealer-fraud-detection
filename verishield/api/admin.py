@@ -7,7 +7,7 @@ import threading
 from datetime import timedelta
 from typing import Optional
 
-from fastapi import APIRouter, Body, Depends, File, HTTPException, UploadFile
+from fastapi import APIRouter, Body, Depends, File, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, PlainTextResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select, text
@@ -368,7 +368,7 @@ def _reset_channels(t: Tenant) -> dict:
 def list_api_clients(p: Principal = Depends(require("api_clients.manage")), db: Session = Depends(get_db)):
     rows = db.execute(select(ApiClient).where(ApiClient.tenant_id == p.tenant_id).order_by(ApiClient.created_at))\
         .scalars().all()
-    return {"clients": [row_dict(c, exclude=("key_hash",)) for c in rows], "scopes": list(API_SCOPES)}
+    return {"clients": [row_dict(c, exclude=("key_hash", "previous_key_hash")) for c in rows], "scopes": list(API_SCOPES)}
 
 
 @router.post("/api-clients", status_code=201)
@@ -386,7 +386,7 @@ def create_api_client(body: dict, p: Principal = Depends(require_user("api_clien
     db.commit()
     audit.record(db, p.tenant_id, "api_client.create", actor=p, resource_type="api_client", resource_id=client.id,
                  after={"name": name, "scopes": scopes, "space": p.space})
-    return {"client": row_dict(client, exclude=("key_hash",)), "api_key": key,
+    return {"client": row_dict(client, exclude=("key_hash", "previous_key_hash")), "api_key": key,
             "note": f"Copy the key now - it is shown only once. It is bound to the {p.space} data space."}
 
 
@@ -557,12 +557,20 @@ def health():
 
 @health_router.get("/ready")
 def ready():
+    from ..services import cluster
     ok, dialect = _db_ok()
     if not ok:
         raise HTTPException(503, {"status": "not ready", "database": dialect})
-    return {"status": "ready", "database": dialect}
+    return {"status": "ready", "database": dialect, "node": cluster.node_id(),
+            "role": "LEADER" if cluster.is_leader() else "FOLLOWER"}
 
 
 @health_router.get("/metrics", response_class=PlainTextResponse)
-def prometheus():
-    return metrics.prometheus()
+def prometheus(request: Request):
+    import hmac
+    if settings.metrics_token:
+        auth = request.headers.get("authorization", "")
+        if not hmac.compare_digest(auth, f"Bearer {settings.metrics_token}"):
+            raise HTTPException(401, {"code": "UNAUTHENTICATED", "message": "metrics token required"})
+    from ..services.metrics import business_gauges
+    return metrics.prometheus() + business_gauges()

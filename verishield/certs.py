@@ -23,7 +23,10 @@ def _write(out_dir: str, cert, key) -> dict:
         pass
     expires = getattr(cert, "not_valid_after_utc", None) or cert.not_valid_after
     return {"cert": str(cert_path), "key": str(key_path), "cer": str(cer_path),
-            "expires": expires.isoformat(), "thumbprint": cert.fingerprint(hashes.SHA1()).hex().upper()}
+            "expires": expires.isoformat(),
+            # Windows identifies certificates by their SHA-1 thumbprint (an identifier, not a security check)
+            "thumbprint": cert.fingerprint(hashes.SHA1()).hex().upper(),  # nosec B303
+            "sha256": cert.fingerprint(hashes.SHA256()).hex().upper()}
 
 
 def make_self_signed(hosts: list[str], out_dir: str, days: int = 825) -> dict:

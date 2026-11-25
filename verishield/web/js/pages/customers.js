@@ -86,6 +86,7 @@ async function drawProfile(el, ref, setTitle, silent = false) {
         ${d.segment ? `<p class="small muted" style="margin-top:10px">${esc(d.segment.description)}</p>` : ""}
         <p class="tiny muted" style="margin-top:8px">A segment is a peer-comparison aid – not a label of guilt, a regulatory risk grade or a standalone reason to block.</p>`)}
     </div>
+    <div class="grid g2" style="margin-top:16px" id="extras"><div id="cra-box"></div><div id="cards-box"></div></div>
     ${d.score_timeline ? `<div style="margin-top:16px">${card("Fraud score timeline (live)", lineChart(d.score_timeline.map((s) => ({ v: s.score, label: `${fmtDate(s.ts)} ${s.decision}`, decision: s.decision })), { threshold: 0.5, colorFn: (pt) => ({ PASS: "#0BAA9B", REVIEW: "#3569C8", HOLD: "#E8A33A", DECLINE: "#C84B55" }[pt.decision] || "#6B7C93") }), { sub: "Dashed line: default review threshold" })}</div>` : ""}
     <div class="grid g3" style="margin-top:16px">
       ${card("Usual hours", hourBars(d.usual.hours))}
@@ -108,6 +109,7 @@ async function drawProfile(el, ref, setTitle, silent = false) {
       <div>${kv(Object.entries(d.engine_profile.temporal.mean).map(([k, v]) => [label(k) + " (24h mean)", `${fmtNum(v, 2)} <span class="muted small">± ${fmtNum(d.engine_profile.temporal.std[k], 2)}</span>`]))}</div>
       <div>${kv(Object.entries(d.engine_profile.local || {}).map(([k, v]) => [label(k), `${fmtNum(v.count)} past operations${v.amount_median ? ` · median ${fmtMoney(v.amount_median)}` : ""}`]))}
       ${d.engine_profile.global && d.engine_profile.global.cluster !== undefined ? `<p class="small muted" style="margin-top:8px">Engine peer group #${esc(d.engine_profile.global.cluster)} · outlier score ${fmtScore(d.engine_profile.global.score)}</p>` : ""}</div></div>`)}</div>` : ""}`;
+  extras(el, ref, silent).catch(errToast);
   if (silent) window.scrollTo(0, y);
   if (d.transactions) {
     const box = el.querySelector("#txs");
@@ -185,4 +187,79 @@ export async function reportFraud(pre = {}) {
       reported_via: m.querySelector("[name=via]").value, description: m.querySelector("[name=description]").value,
       watchlist: m.querySelector("[name=watchlist]").checked, reject_pending: m.querySelector("[name=reject]").checked }) }] });
   if (r) { toast(`Case ${r.case_id} opened${r.watchlisted.length ? ` · ${r.watchlisted.length} counterparty(ies) watch-listed` : ""}`, "ok", 7000); navigate(`#/cases/${encodeURIComponent(r.case_id)}`); }
+}
+
+
+// ------------------------------------------------------------------ risk assessment & cards (cached per visit)
+const LEVEL_TONE = { LOW: "ok", MEDIUM: "warn", HIGH: "crit" };
+
+async function extras(el, ref, silent) {
+  const craBox = el.querySelector("#cra-box"), cardBox = el.querySelector("#cards-box");
+  if (!craBox) return;
+  const cache = (el._extras = el._extras && el._extras.ref === ref ? el._extras : { ref });
+  if (can("cra.view") || can("cra.manage")) {
+    if (!silent || !cache.cra) cache.cra = await api.get(`/customers/${encodeURIComponent(ref)}/risk-assessment`);
+    craBox.innerHTML = craCard(cache.cra);
+    bindCra(el, craBox, ref, cache);
+  }
+  if (can("cards.view") || can("cards.manage")) {
+    if (!silent || !cache.cards) cache.cards = await api.get(`/customers/${encodeURIComponent(ref)}/cards`);
+    cardBox.innerHTML = cardsCard(cache.cards);
+    bindCards(el, cardBox, ref, cache);
+  }
+}
+
+function craCard(d) {
+  const c = d.current;
+  const bar = (x) => `<div style="display:flex;align-items:center;gap:8px"><div style="flex:1;height:6px;border-radius:3px;background:var(--line)"><div style="width:${Math.min(100, x.points)}%;height:6px;border-radius:3px;background:${x.points >= 70 ? "var(--red)" : x.points >= 40 ? "var(--amber)" : "var(--teal)"}"></div></div><span class="tiny mono" style="width:34px;text-align:right">+${x.contribution}</span></div>`;
+  const pending = d.pending ? `<div class="notice warn" style="margin:10px 0">Pending: ${esc(d.pending.previous_level)} → <b>${esc(d.pending.level)}</b> (${esc(d.pending.method.toLowerCase())}, ${esc(d.pending.requested_by)}) – ${esc(d.pending.reason)}
+      ${d.can_approve ? `<div class="row" style="margin-top:6px"><button class="btn sm primary" data-cra="approve" data-id="${d.pending.id}">Approve</button><button class="btn sm" data-cra="reject" data-id="${d.pending.id}">Reject</button></div>` : ""}</div>` : "";
+  return card("Customer risk assessment", `<div class="row" style="gap:18px;align-items:center">
+      <div><div class="tiny muted">RATING IN FORCE</div><div style="font-size:22px;font-weight:700">${chip(d.rating, LEVEL_TONE[d.rating])}</div></div>
+      <div><div class="tiny muted">MODEL SCORE</div><div style="font-size:22px;font-weight:700">${c.score}<span class="small muted"> / 100 → ${esc(c.level)}</span></div></div>
+      ${c.forced && c.forced.length ? `<div class="small">Minimum level: ${esc(c.forced.join("; "))}</div>` : ""}</div>${pending}
+    ${table([{ label: "Factor", render: (x) => `<b class="small">${esc(x.label)}</b><div class="tiny muted">${esc(x.detail)}</div>` },
+      { label: "Weight", num: true, render: (x) => x.weight }, { label: "Contribution", render: bar }], c.factors.filter((x) => x.contribution > 0 || x.points > 0).slice(0, 8))}
+    <details style="margin-top:8px"><summary class="small">History (${d.history.length})</summary>${table([{ label: "When", render: (h) => fmtDate(h.created_at) },
+      { label: "Change", render: (h) => `${esc(h.previous_level || "–")} → <b>${esc(h.level)}</b>` }, { label: "Method", render: (h) => chip(h.method, "neutral") },
+      { label: "Status", render: (h) => chip(h.status) }, { label: "By", render: (h) => esc(h.approved_by || h.requested_by) }], d.history)}</details>`,
+    { flush: false, sub: "Geography, customer type, activity, products, onboarding, PEP / sanctions, behaviour, adverse history, network and tenure",
+      actions: d.can_manage ? '<button class="btn sm" data-cra="run">Re-assess</button><button class="btn sm" data-cra="override">Override</button>' : "" });
+}
+
+function bindCra(el, box, ref, cache) {
+  const reload = async () => { cache.cra = null; await extras(el, ref, false); };
+  box.querySelectorAll("[data-cra]").forEach((b) => (b.onclick = async () => {
+    const a = b.dataset.cra;
+    try {
+      if (a === "run") { const r = await api.post(`/customers/${encodeURIComponent(ref)}/risk-assessment/run`); toast(r.message); }
+      else if (a === "approve" || a === "reject") { await api.post(`/risk-assessments/${b.dataset.id}/${a}`); toast(a === "approve" ? "Approved" : "Rejected"); }
+      else {
+        const r = await modal({ title: `Override the risk rating of ${ref}`, body: `<div class="form-grid"><label class="f">New rating<select class="input" name="level">${options(["LOW", "MEDIUM", "HIGH"], cache.cra.rating)}</select></label></div>
+            <label class="f" style="margin-top:10px">Reason<textarea class="input" name="reason" placeholder="Evidence reviewed, decision of the AML committee..."></textarea></label>
+            <p class="tiny muted" style="margin-top:8px">Raising the rating applies at once. Lowering it needs approval by another manager or the Chief AML (four eyes).</p>`,
+          actions: [{ label: "Cancel" }, { label: "Submit", cls: "primary", onClick: (m) => api.post(`/customers/${encodeURIComponent(ref)}/risk-assessment/override`, { level: m.querySelector("[name=level]").value, reason: m.querySelector("[name=reason]").value }) }] });
+        if (!r) return;
+        toast(r.status === "APPLIED" ? "Rating changed" : "Sent for approval");
+      }
+      await reload();
+    } catch (e) { errToast(e); }
+  }));
+}
+
+function cardsCard(d) {
+  return card("Payment cards", table([
+    { label: "Card", render: (c) => `${icon("card")} <span class="mono small">${esc(c.card_ref)}</span>${c.last_used ? `<div class="tiny muted">last ${esc(label(c.last_type))} ${fmtRel(c.last_used)}</div>` : ""}` },
+    { label: "Status", render: (c) => chip(c.status, c.status === "FROZEN" ? "crit" : "ok") + (c.control && c.status === "FROZEN" ? `<div class="tiny muted">${esc(label(c.control.source))} · ${esc(c.control.reason)}<br>${esc(c.control.command_status)}</div>` : "") },
+    { label: "", render: (c) => d.can_manage ? (c.status === "FROZEN" ? `<button class="btn sm" data-card="unfreeze" data-c="${esc(c.card_ref)}">Unfreeze</button>` : `<button class="btn sm danger" data-card="freeze" data-c="${esc(c.card_ref)}">Freeze</button>`) : "" },
+  ], d.cards, { empty: "No card activity." }), { flush: true, sub: "Frozen cards are blocked in the card system (command through the bank adapter) and declined by VeriShield" });
+}
+
+function bindCards(el, box, ref, cache) {
+  box.querySelectorAll("[data-card]").forEach((b) => (b.onclick = async () => {
+    const freeze = b.dataset.card === "freeze";
+    const r = await modal({ title: `${freeze ? "Freeze" : "Unfreeze"} card ${b.dataset.c}`, body: '<label class="f">Reason<textarea class="input" name="reason"></textarea></label>',
+      actions: [{ label: "Cancel" }, { label: freeze ? "Freeze" : "Unfreeze", cls: freeze ? "danger" : "primary", onClick: (m) => api.post(`/cards/${encodeURIComponent(b.dataset.c)}/${freeze ? "freeze" : "unfreeze"}`, { customer_id: ref, reason: m.querySelector("[name=reason]").value }) }] });
+    if (r) { toast(freeze ? "Card frozen" : "Card unfrozen"); cache.cards = null; extras(el, ref, false).catch(errToast); }
+  }));
 }

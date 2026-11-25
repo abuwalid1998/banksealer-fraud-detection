@@ -1,0 +1,44 @@
+# Alert rules for VeriShield (Prometheus / Alertmanager).
+groups:
+  - name: verishield
+    rules:
+      - alert: VeriShieldNodeDown
+        expr: up{job="verishield"} == 0
+        for: 2m
+        labels: {severity: critical}
+        annotations: {summary: "VeriShield server {{ $labels.instance }} is not answering"}
+      - alert: VeriShieldNoLeader
+        expr: sum(verishield_cluster_leader) == 0
+        for: 2m
+        labels: {severity: critical}
+        annotations: {summary: "No VeriShield node holds the leader lease - channels and background jobs are stopped"}
+      - alert: VeriShieldSlowDecisions
+        expr: max(verishield_latency_ms{route="decision",quantile="p95"}) > 50
+        for: 10m
+        labels: {severity: warning}
+        annotations: {summary: "Decision latency p95 above 50 ms"}
+      - alert: VeriShieldChannelDegraded
+        expr: sum(verishield_connectors{status="DEGRADED"}) > 0
+        for: 5m
+        labels: {severity: warning}
+        annotations: {summary: "A VeriShield channel is degraded"}
+      - alert: VeriShieldDeadLetters
+        expr: verishield_dead_letters_pending > 50
+        for: 15m
+        labels: {severity: warning}
+        annotations: {summary: "Rejected records are piling up in the dead-letter queue"}
+      - alert: VeriShieldSiemLag
+        expr: max(verishield_siem_lag_events) > 500
+        for: 10m
+        labels: {severity: warning}
+        annotations: {summary: "Security events are not reaching the SIEM"}
+      - alert: VeriShieldOverdueCases
+        expr: sum(verishield_cases_overdue{space="LIVE"}) > 0
+        for: 1h
+        labels: {severity: info}
+        annotations: {summary: "AML cases past their due date"}
+      - alert: VeriShieldCriticalAlerts
+        expr: sum(verishield_alerts_open{space="LIVE",severity="CRITICAL"}) > 10
+        for: 30m
+        labels: {severity: warning}
+        annotations: {summary: "More than 10 critical AML alerts waiting"}

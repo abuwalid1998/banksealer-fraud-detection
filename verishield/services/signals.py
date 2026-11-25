@@ -18,7 +18,13 @@ from ..models import LoginEvent, Transaction, WatchlistEntry, utcnow
 
 DEFAULT_SIGNALS = {"watchlist_action": "HOLD", "sanctions_action": "HOLD", "sanctions_min_score": 0.88,
                    "device_risk_review": 0.6, "device_risk_hold": 0.85, "supervised_review": 0.7,
-                   "supervised_hold": 0.9, "confirmation_sms": True, "confirmation_minutes": 30}
+                   "supervised_hold": 0.9, "confirmation_sms": True, "confirmation_minutes": 30,
+                   "cheque_duplicate_action": "HOLD", "cheque_sequence_gap": 60, "cheque_sequence_action": "REVIEW",
+                   "returned_cheques_review": 2, "returned_cheques_hold": 4, "cheque_stale_months": 6,
+                   "cheque_kiting_days": 2, "cheque_kiting_share": 0.8, "cheque_kiting_action": "HOLD",
+                   "mule_review": 0.45, "mule_hold": 0.75, "network_review": 0.6,
+                   "confirmation_channel": "PUSH_THEN_SMS", "push_fallback_seconds": 120,
+                   "freeze_card_on_denial": True}
 KINDS = ("IBAN", "PHONE", "CARD", "MERCHANT", "ORIGINATOR", "DEVICE", "IP", "NAME")
 
 
@@ -209,6 +215,10 @@ def decision_signals(db: Session, tenant, space: str, etx, tx_row, doc: dict, re
                      "message": f"Session risk {risk:.2f}: " + "; ".join(factors)})
     elif factors:
         messages.append(f"Session signals ({risk:.2f}): " + "; ".join(factors))
+    from . import cards, cheques, network
+    hits += cheques.signals(db, tenant.id, space, etx, tx_row, c)
+    hits += network.signals(db, tenant.id, space, etx, c)
+    hits += cards.signals(db, tenant.id, space, etx, tx_row)
     sup = supervised.predict(db, tenant.id, space, etx, result, aml_score) if result is not None else None
     if sup is not None:
         p = sup["probability"]

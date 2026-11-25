@@ -23,6 +23,7 @@ from banksealer.preparation import TransactionPreparer, parse_timestamp
 from .. import audit
 from ..models import (Alert, Customer, Decision, DeadLetterEvent, ExecutionStatusEvent, SystemIncident, Tenant,
                       Transaction, User, utcnow)
+from ..settings import settings
 from . import aml as aml_service
 from .common import space_ref
 from .engine_registry import engine_tx_fields, workspace
@@ -36,7 +37,8 @@ LOCAL_CODES = {"amount": "UNUSUAL_AMOUNT", "iban": "NEW_BENEFICIARY", "phone_num
                "ip": "NEW_IP_ADDRESS", "hour": "UNUSUAL_TIME_OF_DAY", "operator": "UNUSUAL_OPERATOR",
                "merchant": "NEW_MERCHANT", "mcc": "UNUSUAL_MERCHANT_CATEGORY", "merchant_cc": "UNUSUAL_MERCHANT_COUNTRY",
                "entry_mode": "UNUSUAL_CARD_ENTRY_MODE", "terminal": "NEW_TERMINAL", "location": "UNUSUAL_CASH_LOCATION",
-               "counterparty": "NEW_ORIGINATOR", "counterparty_cc": "UNUSUAL_ORIGINATOR_COUNTRY"}
+               "counterparty": "NEW_ORIGINATOR", "counterparty_cc": "UNUSUAL_ORIGINATOR_COUNTRY",
+               "drawer_bank": "UNUSUAL_DRAWER_BANK"}
 TEMPORAL_CODES = {"tx_count": "VELOCITY_ABOVE_PROFILE", "total_amount": "DAILY_AMOUNT_ABOVE_PROFILE",
                   "max_amount": "LARGEST_AMOUNT_ABOVE_PROFILE", "distinct_beneficiaries": "MANY_BENEFICIARIES",
                   "distinct_cc_asn": "MULTIPLE_CONNECTION_ORIGINS", "foreign_count": "FOREIGN_ACTIVITY_ABOVE_PROFILE"}
@@ -45,6 +47,15 @@ RULE_CODES = {"high_risk_country": "HIGH_RISK_COUNTRY", "night": "NIGHT_ACTIVITY
               "global_alert": "PEER_PROFILE_ALERT"}
 REASON_CODE_TEXT = {
     "CARD_TESTING_PATTERN": "Burst of online card payments to new merchants (card testing)",
+    "DUPLICATE_CHEQUE": "The same cheque (drawer account and number) was already presented",
+    "CHEQUE_SEQUENCE_ANOMALY": "Cheque number far outside the customer's cheque book sequence (stolen cheque book?)",
+    "RETURNED_CHEQUE_DRAWER": "Cheque drawn on an account with returned (bounced) cheques",
+    "POST_DATED_OR_STALE_CHEQUE": "Cheque presented before its date or after the validity period",
+    "CHEQUE_KITING": "Funds from uncleared cheques withdrawn or transferred out (kiting)",
+    "UNUSUAL_DRAWER_BANK": "Cheque drawn on a bank this customer does not usually receive cheques from",
+    "MULE_ACCOUNT_SUSPECTED": "Beneficiary account receives money from many unrelated customers (mule account)",
+    "LINKED_TO_FRAUD_NETWORK": "Customer is linked to confirmed fraud through shared accounts, devices or IPs",
+    "CARD_FROZEN": "The card is frozen (by the customer or the bank)",
     "ATM_CASHOUT_PATTERN": "Repeated night-time ATM withdrawals (possible cloned card)",
     "NEW_MERCHANT": "Merchant not used before by this customer",
     "UNUSUAL_MERCHANT_CATEGORY": "Unusual merchant category for this customer",
@@ -156,7 +167,8 @@ def map_request(payload: dict, tenant_id: str) -> dict:
             record.setdefault("merchant", beneficiary)
         elif tx_type in ("cash_withdrawal", "cash_deposit", "atm_withdrawal", "deposit", "withdrawal"):
             record.setdefault("terminal", beneficiary)
-        elif tx_type in ("incoming_transfer", "incoming", "credit_transfer"):
+        elif tx_type in ("incoming_transfer", "incoming", "credit_transfer", "cheque_deposit", "cheque_payment",
+                         "cheque_in", "cheque_out"):
             record.setdefault("counterparty", beneficiary)
         else:
             record.setdefault("iban", beneficiary)
@@ -183,6 +195,8 @@ def reason_codes(result, rule_hits: list[dict], aml: dict, max_reasons: int = 6)
             continue
         if r.profile == "local":
             code = LOCAL_CODES.get(r.feature, "UNUSUAL_BEHAVIOUR")
+            if r.feature == "counterparty" and r.message.startswith("Cheque payee"):
+                code = "NEW_BENEFICIARY"
             if code == "NEW_BENEFICIARY" and "rarely" in r.message:
                 code = "RARE_BENEFICIARY"
             add(code)
@@ -314,7 +328,7 @@ def response(dec: Decision, tx: Optional[Transaction] = None) -> dict:
 
 # --------------------------------------------------------------------------- evaluation
 DETAIL_FIELDS = ("beneficiary_name", "purpose", "narrative", "city", "branch", "merchant", "device", "gateway",
-                 "terminal_id")
+                 "terminal_id", "card_ref", "card_token", "masked_pan")
 
 
 def _enrich(tx_row: Transaction, payload: dict) -> None:
@@ -381,7 +395,7 @@ def evaluate(db: Session, tenant_id: str, space: str, payload: dict, mode: str =
     dec = Decision(id=space_ref(db, tenant_id, space, "DEC", 7), tenant_id=tenant_id, space=space,
                    tx_ref=etx.tx_id, customer_ref=etx.user_id, idempotency_key=idem, mode=mode,
                    policy_version=policy.id, correlation_id=correlation, issued_at=now, caller=caller,
-                   customer_risk_context=customer.risk_category or "UNKNOWN")
+                   customer_risk_context=customer.risk_category or "UNKNOWN", node_id=settings.node_id)
     explanation = ""
     fallback = ""
     try:
@@ -503,6 +517,12 @@ def ingest_events(db: Session, tenant_id: str, space: str, records: list[dict], 
                 record_login(db, tenant_id, space, raw)
                 stats["accepted"] += 1
                 stats["logins"] = stats.get("logins", 0) + 1
+                continue
+            if isinstance(raw, dict) and str(raw.get("record_type") or "").lower() == "cheque_return":
+                from .cheques import record_return
+                record_return(db, tenant_id, space, raw)
+                stats["accepted"] += 1
+                stats["cheque_returns"] = stats.get("cheque_returns", 0) + 1
                 continue
             if mode == "HISTORY":
                 created = store_history(db, tenant_id, space, raw, source, field_mapping)

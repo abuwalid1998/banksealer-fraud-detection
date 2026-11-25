@@ -15,7 +15,6 @@ from .db import create_schema, init_engine, session_scope
 from .models import Tenant, User, utcnow
 from .security import hash_password
 from .services import demo, engine_registry, policy
-from .services.connectors import start_enabled
 from .settings import settings
 
 log = logging.getLogger("verishield.bootstrap")
@@ -167,6 +166,9 @@ def initialise(seed_demo: Optional[bool] = None, quiet: bool = False) -> dict:
             _manual_channel_start(db, settings.tenant_code)
             from .services import screening
             screening.seed_demo(db, settings.tenant_code)
+        from .services import cluster
         if settings.background_jobs:
-            start_enabled(db)
+            cluster.heartbeat(db)          # becomes leader (single server) and starts the channels
+        else:
+            cluster.heartbeat(db, duties=False)
     return summary

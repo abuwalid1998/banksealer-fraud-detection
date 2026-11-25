@@ -78,9 +78,9 @@ def token_hash(token: str) -> str:
     return hmac.new(settings.secret_key.encode(), token.encode(), hashlib.sha256).hexdigest()
 
 
-def new_api_key() -> tuple[str, str, str]:
-    """Returns ``(full_key, prefix, hash)``; only the hash is stored."""
-    prefix = "vs_" + secrets.token_hex(4)
+def new_api_key(prefix: str = "") -> tuple[str, str, str]:
+    """Returns ``(full_key, prefix, hash)``; only the hash is stored. A rotation keeps the prefix."""
+    prefix = prefix or "vs_" + secrets.token_hex(4)
     key = f"{prefix}.{secrets.token_urlsafe(32)}"
     return key, prefix, token_hash(key)
 
@@ -115,13 +115,107 @@ def totp_uri(secret: str, account: str, issuer: str = "VeriShield") -> str:
 
 
 # --------------------------------------------------------------------------- secrets vault
+# Key ring: ``vault.keys`` in the data directory (or VERISHIELD_VAULT_KEY_FILE, e.g. on a separately protected
+# volume). The first key encrypts; every key - and the legacy key derived from the server secret - decrypts, so a
+# rotation never makes stored secrets unreadable. ``rotate_vault_key`` adds a key and re-encrypts everything.
+def keyring_path():
+    from pathlib import Path
+    custom = os.environ.get("VERISHIELD_VAULT_KEY_FILE", "")
+    return Path(custom) if custom else settings.data_dir / "vault.keys"
+
+
+def _legacy_key() -> bytes:
+    return base64.urlsafe_b64encode(hashlib.sha256(("vault:" + settings.secret_key).encode()).digest())
+
+
+def keyring() -> list[dict]:
+    import json
+    path = keyring_path()
+    try:
+        keys = json.loads(path.read_text(encoding="utf-8")) if path.exists() else []
+    except (OSError, ValueError):
+        keys = []
+    return [k for k in keys if k.get("key")]
+
+
+def _save_keyring(keys: list[dict]) -> None:
+    import json
+    path = keyring_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(keys, indent=1), encoding="utf-8")
+    try:
+        os.chmod(tmp, 0o600)
+    except OSError:  # pragma: no cover - Windows ACLs are set by the installer
+        pass
+    os.replace(tmp, path)
+
+
 def _fernet():
     try:
-        from cryptography.fernet import Fernet
+        from cryptography.fernet import Fernet, MultiFernet
     except ImportError:  # pragma: no cover - cryptography is a declared dependency
         return None
-    key = base64.urlsafe_b64encode(hashlib.sha256(("vault:" + settings.secret_key).encode()).digest())
-    return Fernet(key)
+    keys = [Fernet(k["key"].encode()) for k in keyring()] + [Fernet(_legacy_key())]
+    return MultiFernet(keys)
+
+
+def vault_status() -> dict:
+    keys = keyring()
+    return {"keys": [{"id": k["id"], "created": k.get("created", ""), "primary": i == 0} for i, k in enumerate(keys)],
+            "primary": keys[0]["id"] if keys else "LEGACY", "primary_created": keys[0].get("created") if keys else "",
+            "file": str(keyring_path()), "legacy_in_use": not keys}
+
+
+def rotate_vault_key(db) -> dict:
+    """New primary key; every stored secret and MFA seed is re-encrypted with it. Returns counts."""
+    from cryptography.fernet import Fernet
+    from datetime import datetime, timezone
+    from .models import SecretRecord, User
+    keys = keyring()
+    new = {"id": f"K{len(keys) + 1}-{secrets.token_hex(3)}", "key": Fernet.generate_key().decode(),
+           "created": datetime.now(timezone.utc).isoformat(timespec="seconds")}
+    _save_keyring([new] + keys)
+    f = _fernet()
+    counts = {"secrets": 0, "mfa_seeds": 0, "failed": 0}
+    from sqlalchemy import select
+    for rec in db.execute(select(SecretRecord)).scalars():
+        try:
+            rec.ciphertext = f.rotate(rec.ciphertext.encode()).decode()
+            counts["secrets"] += 1
+        except Exception:  # noqa: BLE001 - unreadable value: keep it, report it
+            counts["failed"] += 1
+    for u in db.execute(select(User).where(User.mfa_secret.is_not(None))).scalars():
+        if not u.mfa_secret:
+            continue
+        try:
+            u.mfa_secret = f.rotate(u.mfa_secret.encode()).decode()
+            counts["mfa_seeds"] += 1
+        except Exception:  # noqa: BLE001
+            counts["failed"] += 1
+    db.commit()
+    counts["primary"] = new["id"]
+    return counts
+
+
+def retire_old_keys(db) -> dict:
+    """Keep only the primary key, after checking that every stored value decrypts with it."""
+    from cryptography.fernet import Fernet, InvalidToken
+    from sqlalchemy import select
+    from .models import SecretRecord, User
+    keys = keyring()
+    if not keys:
+        raise ValueError("rotate the vault key first")
+    primary = Fernet(keys[0]["key"].encode())
+    values = [r.ciphertext for r in db.execute(select(SecretRecord)).scalars()] + \
+             [u.mfa_secret for u in db.execute(select(User).where(User.mfa_secret.is_not(None))).scalars() if u.mfa_secret]
+    for v in values:
+        try:
+            primary.decrypt(v.encode())
+        except InvalidToken:
+            raise ValueError("some values are still encrypted with an older key - rotate again first")
+    _save_keyring(keys[:1])
+    return {"retired": len(keys) - 1, "primary": keys[0]["id"]}
 
 
 def encrypt_secret(value: str) -> str:
@@ -145,6 +239,20 @@ def encrypt_field(value: str) -> str:
 
 def decrypt_field(value: str) -> str:
     return decrypt_secret(value)
+
+
+def check_url(url: str) -> str:
+    """Outbound URLs configured by administrators: only http(s), no file:, ftp:, data: ..."""
+    from urllib.parse import urlparse
+    parts = urlparse(url or "")
+    if parts.scheme not in ("http", "https") or not parts.netloc:
+        raise ValueError("only http:// or https:// URLs are allowed")
+    return url
+
+
+def sign_blob(blob: bytes) -> str:
+    """HMAC of an internal binary artefact (model checkpoints) so that tampered data is never unpickled."""
+    return hmac.new(("blob:" + settings.secret_key).encode(), blob, hashlib.sha256).hexdigest()
 
 
 # --------------------------------------------------------------------------- masking

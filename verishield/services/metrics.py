@@ -67,3 +67,64 @@ class Metrics:
 
 
 metrics = Metrics()
+
+
+# --------------------------------------------------------------------------- business / platform gauges
+_gauge_cache: dict = {"at": 0.0, "text": ""}
+
+
+def business_gauges(max_age: float = 15.0) -> str:
+    """Prometheus gauges read from the database (cached for ``max_age`` seconds)."""
+    if time.time() - _gauge_cache["at"] < max_age and _gauge_cache["text"]:
+        return _gauge_cache["text"]
+    from datetime import timedelta
+
+    from sqlalchemy import func, select
+
+    from .. import __version__
+    from ..db import SessionLocal
+    from ..models import (Alert, Case, CardControl, Connector, CtrReport, CustomerConfirmation, Decision,
+                          DeadLetterEvent, SystemIncident, utcnow)
+    from . import cluster
+
+    lines = [f'verishield_build_info{{version="{__version__}",node="{cluster.node_id()}"}} 1',
+             f'verishield_cluster_leader{{node="{cluster.node_id()}"}} {1 if cluster.is_leader() else 0}']
+    try:
+        with SessionLocal() as db:
+            now = utcnow()
+            alive = sum(1 for n in cluster.nodes(db) if n["alive"])
+            lines.append(f"verishield_cluster_nodes_alive {alive}")
+            for space, sev, n in db.execute(select(Alert.space, Alert.severity, func.count()).where(
+                    Alert.status.in_(("OPEN", "TRIAGED"))).group_by(Alert.space, Alert.severity)).all():
+                lines.append(f'verishield_alerts_open{{space="{space}",severity="{sev}"}} {n}')
+            for space, n in db.execute(select(Case.space, func.count()).where(Case.closed_at.is_(None))
+                                       .group_by(Case.space)).all():
+                lines.append(f'verishield_cases_open{{space="{space}"}} {n}')
+            for space, n in db.execute(select(Case.space, func.count()).where(
+                    Case.closed_at.is_(None), Case.due_at.is_not(None), Case.due_at < now).group_by(Case.space)).all():
+                lines.append(f'verishield_cases_overdue{{space="{space}"}} {n}')
+            for status, n in db.execute(select(Connector.status, func.count()).group_by(Connector.status)).all():
+                lines.append(f'verishield_connectors{{status="{status}"}} {n}')
+            lines.append("verishield_dead_letters_pending " + str(db.execute(select(func.count()).select_from(
+                DeadLetterEvent).where(DeadLetterEvent.status == "PENDING")).scalar() or 0))
+            lines.append("verishield_incidents_open " + str(db.execute(select(func.count()).select_from(
+                SystemIncident).where(SystemIncident.status.notin_(("RESOLVED", "POSTMORTEM")))).scalar() or 0))
+            lines.append("verishield_confirmations_pending " + str(db.execute(select(func.count()).select_from(
+                CustomerConfirmation).where(CustomerConfirmation.status == "SENT")).scalar() or 0))
+            lines.append("verishield_cards_frozen " + str(db.execute(select(func.count()).select_from(
+                CardControl).where(CardControl.status == "FROZEN")).scalar() or 0))
+            lines.append("verishield_ctr_draft " + str(db.execute(select(func.count()).select_from(
+                CtrReport).where(CtrReport.status == "DRAFT")).scalar() or 0))
+            for space, dec, n in db.execute(select(Decision.space, Decision.decision, func.count()).where(
+                    Decision.issued_at >= now - timedelta(minutes=5)).group_by(Decision.space, Decision.decision)).all():
+                lines.append(f'verishield_decisions_5m{{space="{space}",decision="{dec}"}} {n}')
+            from ..models import Tenant
+            from . import siem
+            for t in db.execute(select(Tenant)).scalars():
+                st = siem.public(db, t)
+                if st["config"]["enabled"]:
+                    lines.append(f'verishield_siem_lag_events{{tenant="{t.id}"}} {st["state"].get("lag") or 0}')
+    except Exception as exc:  # noqa: BLE001 - metrics must never fail the scrape
+        lines.append(f'verishield_metrics_error{{error="{type(exc).__name__}"}} 1')
+    _gauge_cache.update(at=time.time(), text="\n".join(lines) + "\n")
+    return _gauge_cache["text"]
