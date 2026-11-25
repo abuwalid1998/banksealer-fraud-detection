@@ -9,3 +9,12 @@ tests/
 .env
 .venv
 *.db
+frontend
+data
+reports
+docs
+tests
+backend
+database
+infrastructure
+ml

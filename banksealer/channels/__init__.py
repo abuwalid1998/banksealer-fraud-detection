@@ -19,7 +19,8 @@ def create_channel(spec: dict, out_queue: Optional[queue.Queue] = None) -> Chann
     kind = spec.get("type")
     if kind not in CHANNEL_TYPES:
         raise ValueError(f"unknown channel type {kind!r}; known: {', '.join(CHANNEL_TYPES)}")
-    return CHANNEL_TYPES[kind](spec.get("name") or kind, spec.get("options") or {}, spec.get("field_mapping"), out_queue)
+    return CHANNEL_TYPES[kind](spec.get("name") or kind, spec.get("options") or {}, spec.get("field_mapping"), out_queue,
+                               spec.get("preparation"))
 
 
 class ChannelManager:

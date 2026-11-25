@@ -27,6 +27,14 @@ from .temporal_profile import TemporalProfiler
 PROFILE_NAMES = {"local": "Local profile", "temporal": "Temporal profile", "global": "Global profile", "rule": "Bank rule"}
 
 
+def ranked_reasons(result: ScoreResult) -> list[Reason]:
+    """Bank rules first, then profile findings by impact, then per-profile alert notes."""
+    rules = [r for r in result.rule_reasons if r.feature not in ("local_alert", "temporal_alert", "global_alert")]
+    profile = sorted(result.reasons, key=lambda r: r.contribution, reverse=True)
+    alerts = [r for r in result.rule_reasons if r not in rules]
+    return sorted(rules, key=lambda r: r.contribution, reverse=True) + profile + alerts
+
+
 def risk_level(score: float, th: dict) -> str:
     if score >= float(th.get("critical", 0.8)):
         return "CRITICAL"
@@ -159,20 +167,27 @@ class BankSealerEngine:
         self.temporal.learn(tx)
         self.global_.add(tx, self.temporal.home.get(tx.user_id))
 
-    def save_model(self, path: str) -> None:
+    def dumps(self) -> bytes:
         import pickle
-        with open(path, "wb") as fh:
-            pickle.dump({"local": self.local, "temporal": self.temporal, "global": self.global_,
-                         "trained": self.trained, "training_size": self.training_size}, fh)
+        return pickle.dumps({"local": self.local, "temporal": self.temporal, "global": self.global_,
+                             "trained": self.trained, "training_size": self.training_size})
 
-    def load_model(self, path: str) -> None:
-        """Load a model saved by :meth:`save_model` (only load files you created: pickle)."""
+    def loads(self, data: bytes) -> None:
+        """Restore a model produced by :meth:`dumps` (pickle: only load data you produced yourself)."""
         import pickle
-        with open(path, "rb") as fh:
-            state = pickle.load(fh)
+        state = pickle.loads(data)
         self.local, self.temporal, self.global_ = state["local"], state["temporal"], state["global"]
         self.trained, self.training_size = state["trained"], state["training_size"]
         self.apply_config(self.config)
+
+    def save_model(self, path: str) -> None:
+        with open(path, "wb") as fh:
+            fh.write(self.dumps())
+
+    def load_model(self, path: str) -> None:
+        """Load a model saved by :meth:`save_model` (only load files you created: pickle)."""
+        with open(path, "rb") as fh:
+            self.loads(fh.read())
 
     # ------------------------------------------------------------ decision
     def decide(self, result: ScoreResult, tx: Transaction) -> ScoreResult:
@@ -232,10 +247,7 @@ class BankSealerEngine:
         return result
 
     def ranked_reasons(self, result: ScoreResult) -> list[Reason]:
-        rules = [r for r in result.rule_reasons if r.feature not in ("local_alert", "temporal_alert", "global_alert")]
-        profile = sorted(result.reasons, key=lambda r: r.contribution, reverse=True)
-        alerts = [r for r in result.rule_reasons if r not in rules]
-        return sorted(rules, key=lambda r: r.contribution, reverse=True) + profile + alerts
+        return ranked_reasons(result)
 
     def explain(self, result: ScoreResult, tx: Transaction, th: dict | None = None) -> str:
         th = th or self.config.thresholds_for(tx.bank_id)

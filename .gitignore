@@ -13,3 +13,7 @@ data/verishield/
 .venv/
 # offline bundles built by deploy/windows/build_offline_bundle.py
 dist/
+frontend/node_modules/
+frontend/dist/
+docker/local-ca.pem
+frontend/*.tsbuildinfo

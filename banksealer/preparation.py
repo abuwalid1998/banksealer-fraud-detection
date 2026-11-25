@@ -150,13 +150,31 @@ def _clean(value: Any) -> Optional[str]:
     return text if text and text.lower() not in ("nan", "none", "null") else None
 
 
+PREPARATION_RULES = {
+    "default_bank": "bank/company id used when the record has none",
+    "default_currency": "currency used when the record has none (default EUR)",
+    "type_mapping": "source operation type -> bank_transfer | phone_recharge | prepaid_card",
+    "amount_scale": "multiply amounts (e.g. 0.01 when the source sends cents)",
+    "timestamp_format": "explicit strptime format of the source timestamps",
+    "defaults": "constant values for missing BankSealer fields, e.g. {currency: EUR}",
+    "min_amount": "reject records with a smaller amount",
+    "max_amount": "reject records with a larger amount (data-quality guard)",
+    "allowed_types": "accept only these operation types",
+}
+
+
 class TransactionPreparer:
-    """Converts raw channel records into validated :class:`Transaction` objects."""
+    """Converts raw channel records into validated :class:`Transaction` objects.
+
+    ``rules`` configures the preparation of one channel (see :data:`PREPARATION_RULES`).
+    """
 
     def __init__(self, field_mapping: dict | None = None, default_bank: str = "DEFAULT",
-                 dedup_capacity: int = 200_000):
+                 dedup_capacity: int = 200_000, rules: dict | None = None):
         self.field_mapping = dict(field_mapping or {})
-        self.default_bank = default_bank
+        self.rules = dict(rules or {})
+        self.default_bank = self.rules.get("default_bank") or default_bank
+        self.rejections: deque[tuple[str, dict]] = deque(maxlen=200)
         self._seen: OrderedDict[str, None] = OrderedDict()
         self._dedup_capacity = dedup_capacity
         self.stats = {"received": 0, "accepted": 0, "rejected": 0, "duplicates": 0}
@@ -195,6 +213,7 @@ class TransactionPreparer:
         except PreparationError as exc:
             self.stats["rejected"] += 1
             self.errors.append(f"[{channel or 'input'}] {exc}")
+            self.rejections.append((str(exc), raw if isinstance(raw, dict) else {"value": str(raw)}))
             return None
         if tx.tx_id in self._seen:
             self.stats["duplicates"] += 1
@@ -214,15 +233,34 @@ class TransactionPreparer:
         if not isinstance(raw, dict):
             raise PreparationError(f"record is not an object: {raw!r}")
         data = self._map_fields(raw)
+        for key, value in (self.rules.get("defaults") or {}).items():
+            if _clean(data.get(key)) is None:
+                data[key] = value
         missing = [f for f in REQUIRED if _clean(data.get(f)) is None]
         if missing:
             raise PreparationError(f"missing required field(s): {', '.join(missing)}")
 
-        timestamp = parse_timestamp(data["timestamp"])
-        amount = parse_amount(data["amount"])
+        fmt = self.rules.get("timestamp_format")
+        if fmt:
+            try:
+                timestamp = datetime.strptime(str(data["timestamp"]).strip(), fmt)
+            except ValueError as exc:
+                raise PreparationError(f"timestamp {data['timestamp']!r} does not match format {fmt!r}") from exc
+        else:
+            timestamp = parse_timestamp(data["timestamp"])
+        amount = parse_amount(data["amount"]) * float(self.rules.get("amount_scale") or 1.0)
         if amount <= 0:
             raise PreparationError(f"amount must be positive, got {amount}")
-        tx_type = normalise_type(data["tx_type"])
+        if self.rules.get("min_amount") not in (None, "") and amount < float(self.rules["min_amount"]):
+            raise PreparationError(f"amount {amount} below channel minimum {self.rules['min_amount']}")
+        if self.rules.get("max_amount") not in (None, "") and amount > float(self.rules["max_amount"]):
+            raise PreparationError(f"amount {amount} above channel maximum {self.rules['max_amount']}")
+        type_map = {str(k).strip().lower(): v for k, v in (self.rules.get("type_mapping") or {}).items()}
+        source_type = str(data["tx_type"]).strip().lower()
+        tx_type = normalise_type(type_map.get(source_type, data["tx_type"]))
+        allowed = self.rules.get("allowed_types")
+        if allowed and tx_type not in allowed:
+            raise PreparationError(f"operation type {tx_type} not accepted by this channel")
 
         iban = normalise_iban(data.get("iban"))
         iban_cc = _clean(data.get("iban_cc"))
@@ -270,7 +308,7 @@ class TransactionPreparer:
             amount=round(amount, 2),
             bank_id=_clean(data.get("bank_id")) or self.default_bank,
             channel=channel,
-            currency=(_clean(data.get("currency")) or "EUR").upper(),
+            currency=(_clean(data.get("currency")) or self.rules.get("default_currency") or "EUR").upper(),
             iban=iban,
             iban_cc=iban_cc.upper() if iban_cc else None,
             ip=_clean(data.get("ip")),

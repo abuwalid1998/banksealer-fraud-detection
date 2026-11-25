@@ -17,6 +17,13 @@ def _records(payload) -> list:
     return [payload]
 
 
+def _is_history(payload, header: str | None = None) -> bool:
+    """Historical (training) data: ``{"history": true, "transactions": [...]}`` or header X-BankSealer-History."""
+    if header and header.strip().lower() in ("1", "true", "yes"):
+        return True
+    return isinstance(payload, dict) and bool(payload.get("history"))
+
+
 class TCPChannel(Channel):
     """Listens on host:port; every line received is a JSON transaction (or a JSON list)."""
 
@@ -36,8 +43,10 @@ class TCPChannel(Channel):
                     if not line:
                         continue
                     try:
-                        for record in _records(json.loads(line)):
-                            channel.emit(record)
+                        payload = json.loads(line)
+                        history = _is_history(payload)
+                        for record in _records(payload):
+                            channel.emit(record, history=history)
                     except json.JSONDecodeError as exc:
                         channel.last_error = f"invalid JSON line: {exc}"
                         channel.preparer.stats["rejected"] += 1
@@ -59,7 +68,7 @@ class HTTPChannel(Channel):
 
     type_name = "http"
     description = "HTTP webhook receiver (POST JSON)"
-    default_options = {"host": "127.0.0.1", "port": 8088, "path": "/transactions"}
+    default_options = {"host": "127.0.0.1", "port": 8088, "path": "/transactions", "token": ""}
 
     def run(self) -> None:
         channel = self
@@ -84,13 +93,18 @@ class HTTPChannel(Channel):
                 if self.path.split("?")[0] != path:
                     return self._reply(404, {"error": f"POST to {path}"})
                 length = int(self.headers.get("Content-Length") or 0)
+                token = channel.options.get("token")
+                if token and self.headers.get("Authorization") != f"Bearer {token}":
+                    return self._reply(401, {"error": "invalid or missing bearer token"})
                 try:
-                    records = _records(json.loads(self.rfile.read(length) or b"null"))
+                    payload = json.loads(self.rfile.read(length) or b"null")
                 except json.JSONDecodeError as exc:
                     return self._reply(400, {"error": f"invalid JSON: {exc}"})
+                history = _is_history(payload, self.headers.get("X-BankSealer-History"))
+                records = _records(payload)
                 for record in records:
-                    channel.emit(record)
-                self._reply(202, {"accepted": len(records)})
+                    channel.emit(record, history=history)
+                self._reply(202, {"accepted": len(records), "history": history})
 
         self.server = ThreadingHTTPServer((self.options["host"], int(self.options["port"])), Handler)
         self.server.daemon_threads = True

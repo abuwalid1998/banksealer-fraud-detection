@@ -1,8 +1,15 @@
-# VeriShield – Transaction Intelligence. Trusted Decisions.
+# BankSealer Fraud Detection – VeriShield
 
-This branch adds **VeriShield**, a browser-based fraud-risk, customer-intelligence and AML case-management
-platform built on the BankSealer engine below (see [`docs/verishield/README.md`](docs/verishield/README.md)
-and the [requirements](docs/verishield/VERISHIELD_BUSINESS_REQUIREMENTS.md)).
+This repository contains three products built on the **BankSealer** behavioural fraud-detection engine
+(Carminati et al., *Computers & Security* 2015):
+
+| Product | What it is | Start here |
+|---|---|---|
+| **VeriShield** (main product, v1.4) | Browser-based real-time fraud decisioning, AML case management, regulatory reporting (STR / CTR), customer risk assessment, screening, network and cheque fraud detection, core-banking API registry, high availability, SIEM and AI-agent (MCP) integration | [`docs/verishield/README.md`](docs/verishield/README.md) |
+| **BankSealer Enterprise** | Docker stack: React console, REST API, worker and PostgreSQL configuration database | [`docs/ENTERPRISE.md`](docs/ENTERPRISE.md) |
+| **BankSealer desktop** | Desktop application and the reference implementation of the engine | below |
+
+## VeriShield
 
 ```bash
 ./start.sh                      # macOS/Linux (Windows: start.bat) – or:
@@ -11,11 +18,26 @@ pip install -r requirements-verishield.txt && python run_verishield.py
 
 Open **http://localhost:8000**, sign in with `1000` / `Admin` (IT Admin – you will be asked to change the
 password). Development accounts for the other roles are listed on the sign-in page:
-`2000` AML Manager, `3001`/`3002` AML Employees, `4000` Chief AML/Compliance.
+`2000` AML Manager, `3001`/`3002` AML Employees, `4000` Chief AML/Compliance, `5000` CEO.
 Docker: `docker compose up --build` (or `docker compose -f docker-compose.postgres.yml up --build`).
 Windows Server without internet: see [`deploy/windows/README.md`](deploy/windows/README.md) (offline bundle + one-click installer).
+High availability, monitoring and security tooling: [`deploy/ha`](deploy/ha/README.md), [`deploy/monitoring`](deploy/monitoring),
+[`deploy/security`](deploy/security/scan.py). Solution book (PDF): [`docs/verishield`](docs/verishield).
 
 ![VeriShield](docs/verishield/screenshots/manager-overview.png)
+
+## BankSealer Enterprise (Docker stack)
+
+```bash
+cp .env.example .env          # uncomment and change the Enterprise section (ADMIN_PASSWORD, JWT_SECRET, POSTGRES_PASSWORD)
+docker compose -f docker-compose.enterprise.yml --profile demo up -d --build
+```
+
+Console http://localhost:8080 (`admin` / `ADMIN_PASSWORD`), API docs http://localhost:8000/api/docs. VeriShield and
+the Enterprise stack both default to port 8000 - run one at a time or change `API_PORT`. Architecture, tables,
+channels and operations: [`docs/ENTERPRISE.md`](docs/ENTERPRISE.md).
+
+![BankSealer Enterprise](docs/enterprise/dashboard.png)
 
 ---
 
